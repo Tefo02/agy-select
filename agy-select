@@ -44,7 +44,7 @@ selected=$(find "$BRAIN_DIR" -name "transcript.jsonl" -printf "%T@ %p\n" |
             sub("\\s+$"; "");
 
           try fromjson catch null |
-          select(. != null and (.type == "USER_INPUT" or .type == "MODEL")) |
+          select(. != null and (.type == "USER_INPUT" or (.type == "PLANNER_RESPONSE" and .source == "MODEL" and .content != null))) |
           if .type == "USER_INPUT" then
             "👤 User:\n\(.content | clean_preview)\n"
           else
