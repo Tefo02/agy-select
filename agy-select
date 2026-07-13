@@ -36,7 +36,7 @@ list_conversations() {
       ) |
       to_entries[] |
       select(.value != "IGNORE_ME") |
-      "\(.key)\t\(.key | split("/") as $parts | ($parts | index(".system_generated")) as $idx | if $idx then $parts[$idx - 1] else $parts[-1] end)\t\(.value // "Sem mensagens")"
+      "\(.key | split("/") as $parts | ($parts | index(".system_generated")) as $idx | $parts[0:$idx] | join("/"))\t\(.key | split("/") as $parts | ($parts | index(".system_generated")) as $idx | if $idx then $parts[$idx - 1] else $parts[-1] end)\t\(.value // "Sem mensagens")"
     '
 }
 
@@ -52,7 +52,7 @@ selected=$(list_conversations |
         --with-nth='2..' \
         --prompt="Selecione uma conversa para continuar > " \
         --header="[ENTER] Continuar | [CTRL-D] Apagar conversa | [ESC] Sair" \
-        --bind 'ctrl-d:execute(whiptail --title "Confirmar Exclusão" --yesno "Deseja apagar permanentemente esta conversa?" 8 60 && rm -rf "$(dirname "$(dirname "$(dirname "{1}")")")")+reload(bash '"$SCRIPT_PATH"' list)' \
+        --bind 'ctrl-d:execute(whiptail --title "Confirmar Exclusão" --yesno "Deseja apagar permanentemente esta conversa?" 8 60 && rm -rf "{1}")+reload(bash '"$SCRIPT_PATH"' list)' \
         --preview='jq -R -r '\''
           def clean_preview:
             tostring |
@@ -68,7 +68,7 @@ selected=$(list_conversations |
           else
             "🤖 AI:\n\(.content | clean_preview)\n"
           end
-        '\'' {1} | tail -n 25' \
+        '\'' "{1}/.system_generated/logs/transcript.jsonl" | tail -n 25' \
         --preview-window='right:50%:wrap'
 )
 
