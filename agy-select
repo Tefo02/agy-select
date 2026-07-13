@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 
-# Diretório onde os históricos estão guardados
-BRAIN_DIR="$HOME/.gemini/antigravity-cli/brain"
+# Resolve o caminho absoluto deste script para permitir o recarregamento do fzf
+SCRIPT_PATH=$(realpath "$0")
 
-# 1. Busca e ordena os arquivos por data de modificação (mais recentes primeiro)
-# 2. Processa tudo de uma vez com o jq usando xargs (super rápido!)
-#    - Usa "jq -R" (raw input) com "try fromjson catch null" para tolerar arquivos corrompidos/incompletos
-# 3. Exibe no fzf com preview formatado no lado direito
-selected=$(find "$BRAIN_DIR" -name "transcript.jsonl" -printf "%T@ %p\n" |
+# Diretório onde os históricos estão guardados
+BRAIN_DIR="/home/sld2/.gemini/antigravity-cli/brain"
+
+list_conversations() {
+    find "$BRAIN_DIR" -name "transcript.jsonl" -printf "%T@ %p\n" |
     sort -rn |
     cut -d' ' -f2- |
     xargs -r -d '\n' jq -R -n -r '
@@ -23,18 +23,36 @@ selected=$(find "$BRAIN_DIR" -name "transcript.jsonl" -printf "%T@ %p\n" |
       reduce inputs as $line ({};
         (try ($line | fromjson) catch null) as $in |
         if $in and $in.type == "USER_INPUT" then
-          .[input_filename] = ($in.content | clean_text)
+          if ($in.content | tostring | contains("consolidador de Memória de Longo Prazo") or contains("extrator de memória de longo prazo")) then
+            .[input_filename] = "IGNORE_ME"
+          else
+            if .[input_filename] != "IGNORE_ME" then
+              .[input_filename] = ($in.content | clean_text)
+            end
+          end
         else
           .[input_filename] = (.[input_filename] // null)
         end
       ) |
       to_entries[] |
+      select(.value != "IGNORE_ME") |
       "\(.key)\t\(.key | split("/") as $parts | ($parts | index(".system_generated")) as $idx | if $idx then $parts[$idx - 1] else $parts[-1] end)\t\(.value // "Sem mensagens")"
-    ' |
+    '
+}
+
+# Se o primeiro argumento for "list", apenas exibe a listagem das conversas e encerra
+if [ "$1" = "list" ]; then
+    list_conversations
+    exit 0
+fi
+
+# Exibe no fzf com preview formatado e atalho para exclusão (CTRL-D)
+selected=$(list_conversations |
     fzf --delimiter=$'\t' \
         --with-nth='2..' \
         --prompt="Selecione uma conversa para continuar > " \
-        --header="[ENTER] Continuar | [ESC] Sair" \
+        --header="[ENTER] Continuar | [CTRL-D] Apagar conversa | [ESC] Sair" \
+        --bind 'ctrl-d:execute(bash -c '\''read -p "Deseja apagar permanentemente esta conversa? [y/N]: " ans; if [[ "$ans" =~ ^[Yy]$ ]]; then rm -rf "$(dirname "$(dirname "$(dirname "{1}")")")"; echo "Conversa apagada."; sleep 0.5; fi'\'')+reload(bash '"$SCRIPT_PATH"' list)' \
         --preview='jq -R -r '\''
           def clean_preview:
             tostring |
