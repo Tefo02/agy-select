@@ -4,7 +4,7 @@
 SCRIPT_PATH=$(realpath "$0")
 
 # Diretório onde os históricos estão guardados
-BRAIN_DIR="/home/sld2/.gemini/antigravity-cli/brain"
+BRAIN_DIR="$HOME/.gemini/antigravity-cli/brain"
 
 list_conversations() {
     find "$BRAIN_DIR" -name "transcript.jsonl" -printf "%T@ %p\n" |
