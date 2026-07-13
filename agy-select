@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+
+# Diretório onde os históricos estão guardados
+BRAIN_DIR="$HOME/.gemini/antigravity-cli/brain"
+
+# 1. Busca e ordena os arquivos por data de modificação (mais recentes primeiro)
+# 2. Processa tudo de uma vez com o jq usando xargs (super rápido!)
+#    - Usa "jq -R" (raw input) com "try fromjson catch null" para tolerar arquivos corrompidos/incompletos
+# 3. Exibe no fzf com preview formatado no lado direito
+selected=$(find "$BRAIN_DIR" -name "transcript.jsonl" -printf "%T@ %p\n" |
+    sort -rn |
+    cut -d' ' -f2- |
+    xargs -r -d '\n' jq -R -n -r '
+      def clean_text:
+        tostring |
+        gsub("<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE|USER_INFORMATION|skills|subagents|messaging|conversation_transcript|artifacts|slash_commands|guidelines|communication_style|web_application_development|identity)>[\\s\\S]*?</\\1>"; "") |
+        gsub("<[^>]+>"; "") |
+        gsub("\\s+"; " ") |
+        sub("^\\s+"; "") |
+        sub("\\s+$"; "") |
+        .[0:100];
+
+      reduce inputs as $line ({};
+        (try ($line | fromjson) catch null) as $in |
+        if $in and $in.type == "USER_INPUT" then
+          .[input_filename] = ($in.content | clean_text)
+        else
+          .[input_filename] = (.[input_filename] // null)
+        end
+      ) |
+      to_entries[] |
+      "\(.key)\t\(.key | split("/") as $parts | ($parts | index(".system_generated")) as $idx | if $idx then $parts[$idx - 1] else $parts[-1] end)\t\(.value // "Sem mensagens")"
+    ' |
+    fzf --delimiter=$'\t' \
+        --with-nth='2..' \
+        --prompt="Selecione uma conversa para continuar > " \
+        --header="[ENTER] Continuar | [ESC] Sair" \
+        --preview='jq -R -r '\''
+          def clean_preview:
+            tostring |
+            gsub("<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE|USER_INFORMATION|skills|subagents|messaging|conversation_transcript|artifacts|slash_commands|guidelines|communication_style|web_application_development|identity)>[\\s\\S]*?</\\1>"; "") |
+            gsub("<[^>]+>"; "") |
+            sub("^\\s+"; "") |
+            sub("\\s+$"; "");
+
+          try fromjson catch null |
+          select(. != null and (.type == "USER_INPUT" or .type == "MODEL")) |
+          if .type == "USER_INPUT" then
+            "👤 User:\n\(.content | clean_preview)\n"
+          else
+            "🤖 AI:\n\(.content | clean_preview)\n"
+          end
+        '\'' {1} | tail -n 25' \
+        --preview-window='right:50%:wrap'
+)
+
+# Se o usuário escolher alguma conversa, executa o agy no shell ativo
+if [ -n "$selected" ]; then
+    cid=$(echo "$selected" | cut -f2)
+    agy --conversation "$cid"
+fi
