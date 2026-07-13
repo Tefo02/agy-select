@@ -46,13 +46,13 @@ if [ "$1" = "list" ]; then
     exit 0
 fi
 
-# Exibe no fzf com preview formatado e atalho para exclusão (CTRL-D)
+# Exibe no fzf com preview formatado e atalho para exclusão (CTRL-D) usando whiptail para confirmação estável
 selected=$(list_conversations |
     fzf --delimiter=$'\t' \
         --with-nth='2..' \
         --prompt="Selecione uma conversa para continuar > " \
         --header="[ENTER] Continuar | [CTRL-D] Apagar conversa | [ESC] Sair" \
-        --bind 'ctrl-d:execute(bash -c '\''read -p "Deseja apagar permanentemente esta conversa? [y/N]: " ans; if [[ "$ans" =~ ^[Yy]$ ]]; then rm -rf "$(dirname "$(dirname "$(dirname "{1}")")")"; echo "Conversa apagada."; sleep 0.5; fi'\'')+reload(bash '"$SCRIPT_PATH"' list)' \
+        --bind 'ctrl-d:execute(whiptail --title "Confirmar Exclusão" --yesno "Deseja apagar permanentemente esta conversa?" 8 60 && rm -rf "$(dirname "$(dirname "$(dirname "{1}")")")")+reload(bash '"$SCRIPT_PATH"' list)' \
         --preview='jq -R -r '\''
           def clean_preview:
             tostring |
