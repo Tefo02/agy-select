@@ -31,7 +31,7 @@ Certifique-se de ter as seguintes ferramentas instaladas em seu sistema:
 
 1.  **Clone este repositório ou baixe o script:**
     ```bash
-    git clone https://github.com/seu-usuario/agy-select.git
+    git clone https://github.com/Tefo02/agy-select.git
     cd agy-select
     ```
 
