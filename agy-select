@@ -1,61 +1,818 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
+"""
+agy-select: Terminal User Interface (TUI) interativa estilo lazygit
+para gerenciar, pesquisar e retomar conversas do Google Antigravity CLI (agy).
+"""
 
-# Diretório onde os históricos estão guardados
-BRAIN_DIR="$HOME/.gemini/antigravity-cli/brain"
+import curses
+import glob
+import json
+import os
+import re
+import shutil
+import sqlite3
+import sys
+import textwrap
 
-# 1. Busca e ordena os arquivos por data de modificação (mais recentes primeiro)
-# 2. Processa tudo de uma vez com o jq usando xargs (super rápido!)
-#    - Usa "jq -R" (raw input) com "try fromjson catch null" para tolerar arquivos corrompidos/incompletos
-# 3. Exibe no fzf com preview formatado no lado direito
-selected=$(find "$BRAIN_DIR" -name "transcript.jsonl" -printf "%T@ %p\n" |
-    sort -rn |
-    cut -d' ' -f2- |
-    xargs -r -d '\n' jq -R -n -r '
-      def clean_text:
-        tostring |
-        gsub("<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE|USER_INFORMATION|skills|subagents|messaging|conversation_transcript|artifacts|slash_commands|guidelines|communication_style|web_application_development|identity)>[\\s\\S]*?</\\1>"; "") |
-        gsub("<[^>]+>"; "") |
-        gsub("\\s+"; " ") |
-        sub("^\\s+"; "") |
-        sub("\\s+$"; "") |
-        .[0:100];
+BRAIN_DIR = os.path.expanduser("~/.gemini/antigravity-cli/brain")
+DB_PATH = os.path.expanduser("~/.gemini/antigravity-cli/conversation_summaries.db")
 
-      reduce inputs as $line ({};
-        (try ($line | fromjson) catch null) as $in |
-        if $in and $in.type == "USER_INPUT" then
-          .[input_filename] = ($in.content | clean_text)
-        else
-          .[input_filename] = (.[input_filename] // null)
-        end
-      ) |
-      to_entries[] |
-      "\(.key)\t\(.key | split("/") as $parts | ($parts | index(".system_generated")) as $idx | if $idx then $parts[$idx - 1] else $parts[-1] end)\t\(.value // "Sem mensagens")"
-    ' |
-    fzf --delimiter=$'\t' \
-        --with-nth='2..' \
-        --prompt="Selecione uma conversa para continuar > " \
-        --header="[ENTER] Continuar | [ESC] Sair" \
-        --preview='jq -R -r '\''
-          def clean_preview:
-            tostring |
-            gsub("<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE|USER_INFORMATION|skills|subagents|messaging|conversation_transcript|artifacts|slash_commands|guidelines|communication_style|web_application_development|identity)>[\\s\\S]*?</\\1>"; "") |
-            gsub("<[^>]+>"; "") |
-            sub("^\\s+"; "") |
-            sub("\\s+$"; "");
-
-          try fromjson catch null |
-          select(. != null and (.type == "USER_INPUT" or (.type == "PLANNER_RESPONSE" and .source == "MODEL" and .content != null))) |
-          if .type == "USER_INPUT" then
-            "👤 User:\n\(.content | clean_preview)\n"
-          else
-            "🤖 AI:\n\(.content | clean_preview)\n"
-          end
-        '\'' {1} | tail -n 25' \
-        --preview-window='right:50%:wrap'
+TAG_REGEX = re.compile(
+    r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE|USER_INFORMATION|"
+    r"skills|subagents|messaging|conversation_transcript|artifacts|slash_commands|"
+    r"guidelines|communication_style|web_application_development|identity)>[\s\S]*?</\1>",
+    re.IGNORECASE,
 )
+XML_REGEX = re.compile(r"<[^>]+>")
 
-# Se o usuário escolher alguma conversa, executa o agy no shell ativo
-if [ -n "$selected" ]; then
-    cid=$(echo "$selected" | cut -f2)
-    agy --conversation "$cid"
-fi
+
+def clean_text(text: str) -> str:
+    if not text:
+        return ""
+    text = TAG_REGEX.sub("", str(text))
+    text = XML_REGEX.sub("", text)
+    return " ".join(text.split()).strip()
+
+
+def clean_preview(text: str) -> str:
+    if not text:
+        return ""
+    text = TAG_REGEX.sub("", str(text))
+    text = XML_REGEX.sub("", text)
+    return text.strip()
+
+
+def load_conversations(current_dir: str):
+    db_meta = {}
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            for row in cur.execute(
+                "SELECT conversation_id, title, workspace_uris, last_modified_time FROM conversation_summaries"
+            ):
+                cid, title, uris, mtime = row
+                is_local = (current_dir in uris) if uris else False
+                db_meta[cid] = {"title": title or "", "is_local": is_local, "mtime": mtime}
+            conn.close()
+        except Exception:
+            pass
+
+    pattern = os.path.join(BRAIN_DIR, "*", ".system_generated", "logs", "transcript.jsonl")
+    files = glob.glob(pattern)
+
+    conversations = []
+    for f in files:
+        mtime = os.path.getmtime(f)
+        parts = f.split(os.sep)
+        idx = parts.index(".system_generated") if ".system_generated" in parts else -1
+        cid = parts[idx - 1] if idx > 0 else parts[-2]
+        cpath = os.path.dirname(os.path.dirname(os.path.dirname(f)))
+
+        last_user_input = ""
+        full_search_text = []
+        ignore = False
+
+        try:
+            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    try:
+                        data = json.loads(line)
+                        if data.get("type") == "USER_INPUT":
+                            content = str(data.get("content", ""))
+                            if (
+                                "consolidador de Memória de Longo Prazo" in content
+                                or "extrator de memória de longo prazo" in content
+                            ):
+                                ignore = True
+                                break
+                            cleaned = clean_text(content)
+                            last_user_input = cleaned
+                            full_search_text.append(cleaned)
+                        elif data.get("type") == "PLANNER_RESPONSE" and data.get("source") == "MODEL":
+                            content = str(data.get("content", ""))
+                            cleaned = clean_text(content)
+                            if cleaned:
+                                full_search_text.append(cleaned)
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+
+        if ignore:
+            continue
+
+        meta = db_meta.get(cid, {})
+        title = meta.get("title") or last_user_input or "Sem mensagens"
+        is_local = meta.get("is_local", False)
+
+        conversations.append(
+            {
+                "cid": cid,
+                "cpath": cpath,
+                "title": title,
+                "is_local": is_local,
+                "mtime": mtime,
+                "transcript_path": f,
+                "search_blob": " ".join(full_search_text).lower(),
+            }
+        )
+
+    conversations.sort(key=lambda c: c["mtime"], reverse=True)
+    return conversations
+
+
+def load_conversation_messages(transcript_path: str):
+    messages = []
+    if not os.path.exists(transcript_path):
+        return messages
+
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                try:
+                    data = json.loads(line)
+                    m_type = data.get("type")
+                    src = data.get("source")
+                    content = data.get("content")
+                    if m_type == "USER_INPUT" and content:
+                        messages.append(("user", clean_preview(content)))
+                    elif m_type == "PLANNER_RESPONSE" and src == "MODEL" and content:
+                        messages.append(("ai", clean_preview(content)))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return messages
+
+
+class AgSelectTUI:
+    PANEL_SEARCH = 1
+    PANEL_LOCAL = 2
+    PANEL_GLOBAL = 3
+    PANEL_PREVIEW = 4
+
+    def __init__(self, stdscr, current_dir: str):
+        self.stdscr = stdscr
+        self.current_dir = current_dir
+        self.active_panel = self.PANEL_LOCAL
+        self.search_query = ""
+
+        self.all_conversations = load_conversations(self.current_dir)
+        self.filtered_local = []
+        self.filtered_global = []
+
+        self.selected_local_idx = 0
+        self.selected_global_idx = 0
+        self.h_offset_local = 0
+        self.h_offset_global = 0
+
+        self.raw_messages = []
+        self.preview_cache_cid = None
+        self.preview_wrapped_lines = []
+        self.preview_last_width = 0
+        self.preview_scroll = 0
+
+        self.panel_bounds = {}
+
+        self.status_message = ""
+
+        self.init_colors()
+        self.apply_filter()
+
+        # Se não houver conversas locais, inicia no painel global
+        if not self.filtered_local and self.filtered_global:
+            self.active_panel = self.PANEL_GLOBAL
+
+    def init_colors(self):
+        curses.use_default_colors()
+        curses.curs_set(0)
+        # 1: Borda Ativa (Laranja/Amarelo brilhante)
+        curses.init_pair(1, curses.COLOR_YELLOW, -1)
+        # 2: Borda Inativa (Cinza / Branco padrão)
+        curses.init_pair(2, curses.COLOR_WHITE, -1)
+        # 3: Seleção (Fundo Azul/Branco)
+        curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_CYAN)
+        # 4: Título User (Ciano)
+        curses.init_pair(4, curses.COLOR_CYAN, -1)
+        # 5: Título AI (Verde)
+        curses.init_pair(5, curses.COLOR_GREEN, -1)
+        # 6: Destaque de Atalho / Número
+        curses.init_pair(6, curses.COLOR_MAGENTA, -1)
+        # 7: Badge Local (Verde)
+        curses.init_pair(7, curses.COLOR_GREEN, -1)
+        # 8: Status/Erro
+        curses.init_pair(8, curses.COLOR_RED, -1)
+
+    def apply_filter(self):
+        query = self.search_query.strip().lower()
+        if not query:
+            self.filtered_local = [c for c in self.all_conversations if c["is_local"]]
+            self.filtered_global = [c for c in self.all_conversations if not c["is_local"]]
+        else:
+            self.filtered_local = [
+                c
+                for c in self.all_conversations
+                if c["is_local"]
+                and (query in c["title"].lower() or query in c["cid"].lower() or query in c["search_blob"])
+            ]
+            self.filtered_global = [
+                c
+                for c in self.all_conversations
+                if not c["is_local"]
+                and (query in c["title"].lower() or query in c["cid"].lower() or query in c["search_blob"])
+            ]
+
+        # Ajusta índices se saírem do limite
+        if self.filtered_local:
+            self.selected_local_idx = max(0, min(self.selected_local_idx, len(self.filtered_local) - 1))
+        else:
+            self.selected_local_idx = 0
+
+        if self.filtered_global:
+            self.selected_global_idx = max(0, min(self.selected_global_idx, len(self.filtered_global) - 1))
+        else:
+            self.selected_global_idx = 0
+
+        self.h_offset_local = 0
+        self.h_offset_global = 0
+
+        self.update_preview(force_reload=True)
+
+    def get_selected_conversation(self):
+        if self.active_panel == self.PANEL_LOCAL:
+            if self.filtered_local and 0 <= self.selected_local_idx < len(self.filtered_local):
+                return self.filtered_local[self.selected_local_idx]
+        elif self.active_panel in (self.PANEL_GLOBAL, self.PANEL_SEARCH, self.PANEL_PREVIEW):
+            if self.filtered_global and 0 <= self.selected_global_idx < len(self.filtered_global):
+                return self.filtered_global[self.selected_global_idx]
+            elif self.filtered_local and 0 <= self.selected_local_idx < len(self.filtered_local):
+                return self.filtered_local[self.selected_local_idx]
+        return None
+
+    def update_preview(self, force_reload=False):
+        conv = self.get_selected_conversation()
+        if not conv:
+            self.raw_messages = []
+            self.preview_cache_cid = None
+            self.preview_wrapped_lines = [("normal", "Nenhuma conversa selecionada.")]
+            self.preview_scroll = 0
+            self.preview_last_width = 0
+            return
+
+        if not force_reload and conv["cid"] == self.preview_cache_cid:
+            return
+
+        self.preview_cache_cid = conv["cid"]
+        self.preview_scroll = 0
+        self.raw_messages = load_conversation_messages(conv["transcript_path"])
+        self.preview_last_width = 0
+
+    def wrap_preview_content(self, width: int):
+        if width <= 2:
+            self.preview_wrapped_lines = []
+            return
+
+        if self.preview_last_width == width and self.preview_wrapped_lines:
+            return
+
+        self.preview_last_width = width
+        lines = []
+
+        if not self.raw_messages:
+            lines.append(("normal", "Nenhuma mensagem encontrada neste histórico."))
+        else:
+            for role, content in self.raw_messages:
+                if role == "user":
+                    lines.append(("user_hdr", "👤 User:"))
+                else:
+                    lines.append(("ai_hdr", "🤖 AI:"))
+
+                for raw_line in content.split("\n"):
+                    if not raw_line:
+                        lines.append(("body", ""))
+                        continue
+
+                    wrapped = textwrap.wrap(
+                        raw_line,
+                        width=width,
+                        break_long_words=True,
+                        break_on_hyphens=False,
+                        replace_whitespace=False,
+                    )
+                    if not wrapped:
+                        lines.append(("body", ""))
+                    else:
+                        for w in wrapped:
+                            lines.append(("body", w))
+
+                lines.append(("blank", ""))
+
+        self.preview_wrapped_lines = lines
+
+    def draw_box(self, y, x, h, w, title_number, title_name, item_count_str="", is_active=False):
+        if h < 2 or w < 2:
+            return
+
+        color_border = curses.color_pair(1) | curses.A_BOLD if is_active else curses.color_pair(2)
+
+        # Cantos e bordas arredondadas estilo lazygit
+        tl, tr, bl, br = "╭", "╮", "╰", "╯"
+        hz, vt = "─", "│"
+
+        try:
+            # Linha superior
+            top_line = tl + (hz * (w - 2)) + tr
+            self.stdscr.addstr(y, x, top_line[:w], color_border)
+
+            # Laterais
+            for row in range(y + 1, y + h - 1):
+                self.stdscr.addstr(row, x, vt, color_border)
+                self.stdscr.addstr(row, x + w - 1, vt, color_border)
+
+            # Linha inferior
+            bot_line = bl + (hz * (w - 2)) + br
+            self.stdscr.addstr(y + h - 1, x, bot_line[:w], color_border)
+
+            # Título: -[N]-Title-
+            title_prefix = f"-["
+            self.stdscr.addstr(y, x + 1, title_prefix, color_border)
+            self.stdscr.addstr(y, x + 3, str(title_number), curses.color_pair(6) | curses.A_BOLD)
+            self.stdscr.addstr(y, x + 4, f"]-{title_name}-", color_border)
+
+            # Contador: -X of Y- no canto inferior direito
+            if item_count_str and w > len(item_count_str) + 10:
+                count_txt = f"-{item_count_str}-"
+                cx = x + w - 1 - len(count_txt)
+                self.stdscr.addstr(y + h - 1, cx, count_txt, color_border)
+        except curses.error:
+            pass
+
+    def render(self):
+        self.stdscr.erase()
+        max_y, max_x = self.stdscr.getmaxyx()
+
+        if max_y < 16 or max_x < 60:
+            msg = "Terminal muito pequeno. Aumente a janela."
+            try:
+                self.stdscr.addstr(max_y // 2, max(0, (max_x - len(msg)) // 2), msg, curses.color_pair(8))
+            except curses.error:
+                pass
+            self.stdscr.refresh()
+            return
+
+        # Layout responsivo: proporção de 45% esquerda / 55% direita (com mínimo de 35 colunas na esquerda)
+        left_w = max(35, min(int(max_x * 0.45), max_x - 30))
+        right_w = max_x - left_w
+        usable_h = max_y - 2
+
+        search_h = 3
+        remain_h = usable_h - search_h
+        local_h = max(5, remain_h // 2)
+        global_h = remain_h - local_h
+
+        # Salva as regiões de cada painel para detecção de clique do mouse (y, x, h, w)
+        self.panel_bounds = {
+            self.PANEL_SEARCH: (0, 0, search_h, left_w),
+            self.PANEL_LOCAL: (search_h, 0, local_h, left_w),
+            self.PANEL_GLOBAL: (search_h + local_h, 0, global_h, left_w),
+            self.PANEL_PREVIEW: (0, left_w, usable_h, right_w),
+        }
+
+        # 1. Painel Search
+        self.draw_box(
+            0,
+            0,
+            search_h,
+            left_w,
+            1,
+            "Search",
+            "",
+            is_active=(self.active_panel == self.PANEL_SEARCH),
+        )
+        search_prompt = "> " + self.search_query
+        try:
+            self.stdscr.addstr(
+                1,
+                2,
+                search_prompt[: left_w - 4],
+                curses.color_pair(1 if self.active_panel == self.PANEL_SEARCH else 2),
+            )
+        except curses.error:
+            pass
+
+        # 2. Painel Local Chats
+        loc_count = f"{self.selected_local_idx + 1 if self.filtered_local else 0} of {len(self.filtered_local)}"
+        self.draw_box(
+            search_h,
+            0,
+            local_h,
+            left_w,
+            2,
+            "Local Chats",
+            loc_count,
+            is_active=(self.active_panel == self.PANEL_LOCAL),
+        )
+        self.render_list(
+            y_start=search_h + 1,
+            x_start=1,
+            height=local_h - 2,
+            width=left_w - 2,
+            items=self.filtered_local,
+            selected_idx=self.selected_local_idx,
+            h_offset=self.h_offset_local,
+            is_active=(self.active_panel == self.PANEL_LOCAL),
+        )
+
+        # 3. Painel Global Chats
+        glob_count = f"{self.selected_global_idx + 1 if self.filtered_global else 0} of {len(self.filtered_global)}"
+        self.draw_box(
+            search_h + local_h,
+            0,
+            global_h,
+            left_w,
+            3,
+            "Global Chats",
+            glob_count,
+            is_active=(self.active_panel == self.PANEL_GLOBAL),
+        )
+        self.render_list(
+            y_start=search_h + local_h + 1,
+            x_start=1,
+            height=global_h - 2,
+            width=left_w - 2,
+            items=self.filtered_global,
+            selected_idx=self.selected_global_idx,
+            h_offset=self.h_offset_global,
+            is_active=(self.active_panel == self.PANEL_GLOBAL),
+        )
+
+        # 4. Painel Preview
+        preview_pad_x = 2
+        preview_inner_w = max(1, right_w - (preview_pad_x * 2))
+        self.wrap_preview_content(preview_inner_w)
+
+        self.draw_box(
+            0,
+            left_w,
+            usable_h,
+            right_w,
+            4,
+            "Preview",
+            f"Scroll {self.preview_scroll + 1}/{max(1, len(self.preview_wrapped_lines))}",
+            is_active=(self.active_panel == self.PANEL_PREVIEW),
+        )
+        self.render_preview(1, left_w + preview_pad_x, usable_h - 2, preview_inner_w)
+
+        # Rodapé com atalhos
+        footer = " [ENTER] Continuar | [TAB / 1-4] Foco | [←/→] Rolar Título | [d] Apagar | [q / ESC] Sair "
+        if self.status_message:
+            footer = f" {self.status_message} "
+        try:
+            self.stdscr.addstr(max_y - 1, 1, footer[: max_x - 2], curses.color_pair(6) | curses.A_REVERSE)
+        except curses.error:
+            pass
+
+        # Cursor apenas no campo de busca se ativo
+        if self.active_panel == self.PANEL_SEARCH:
+            curses.curs_set(1)
+            cursor_x = min(left_w - 2, 2 + len(search_prompt))
+            try:
+                self.stdscr.move(1, cursor_x)
+            except curses.error:
+                pass
+        else:
+            curses.curs_set(0)
+
+        self.stdscr.refresh()
+
+    def render_list(self, y_start, x_start, height, width, items, selected_idx, h_offset, is_active):
+        if height <= 0 or width <= 0:
+            return
+
+        if not items:
+            msg = "(Nenhuma conversa)"
+            try:
+                self.stdscr.addstr(y_start, x_start + 1, msg[:width], curses.color_pair(2))
+            except curses.error:
+                pass
+            return
+
+        scroll = 0
+        if selected_idx >= height:
+            scroll = selected_idx - height + 1
+
+        for i in range(height):
+            item_idx = scroll + i
+            if item_idx >= len(items):
+                break
+
+            conv = items[item_idx]
+            is_sel = item_idx == selected_idx
+
+            marker = "* " if is_sel else "  "
+            cid_short = conv["cid"][:8]
+            raw_title = conv["title"].replace("\t", " ").strip()
+
+            prefix = f"{marker}{cid_short} "
+            prefix_len = len(prefix)
+
+            # Responsividade horizontal: título com rolagem horizontal no item selecionado e elipse
+            if width <= prefix_len:
+                line_txt = prefix[:width].ljust(width)
+            else:
+                title_area_w = width - prefix_len
+                # Aplica offset horizontal apenas no item selecionado
+                effective_offset = h_offset if is_sel else 0
+                sliced_title = raw_title[effective_offset:]
+
+                if len(sliced_title) > title_area_w and title_area_w > 3:
+                    disp_title = sliced_title[: title_area_w - 1] + "…"
+                else:
+                    disp_title = sliced_title[:title_area_w]
+
+                line_txt = (prefix + disp_title).ljust(width)[:width]
+
+            attr = curses.color_pair(2)
+            if is_sel:
+                if is_active:
+                    attr = curses.color_pair(3) | curses.A_BOLD
+                else:
+                    attr = curses.color_pair(2) | curses.A_REVERSE
+
+            try:
+                self.stdscr.addstr(y_start + i, x_start, line_txt, attr)
+            except curses.error:
+                pass
+
+    def render_preview(self, y_start, x_start, height, width):
+        if height <= 0 or width <= 0 or not self.preview_wrapped_lines:
+            return
+
+        max_scroll = max(0, len(self.preview_wrapped_lines) - height)
+        self.preview_scroll = max(0, min(self.preview_scroll, max_scroll))
+
+        for i in range(height):
+            line_idx = self.preview_scroll + i
+            if line_idx >= len(self.preview_wrapped_lines):
+                break
+
+            style, text = self.preview_wrapped_lines[line_idx]
+            attr = curses.color_pair(2)
+            if style == "user_hdr":
+                attr = curses.color_pair(4) | curses.A_BOLD
+            elif style == "ai_hdr":
+                attr = curses.color_pair(5) | curses.A_BOLD
+
+            disp_text = text[:width].ljust(width)
+            try:
+                self.stdscr.addstr(y_start + i, x_start, disp_text, attr)
+            except curses.error:
+                pass
+
+    def confirm_dialog(self, title, question):
+        max_y, max_x = self.stdscr.getmaxyx()
+        h, w = 7, 50
+        y = max(0, (max_y - h) // 2)
+        x = max(0, (max_x - w) // 2)
+
+        win = curses.newwin(h, w, y, x)
+        win.keypad(True)
+        curses.curs_set(0)
+
+        selected_btn = 0  # 0: Não, 1: Sim
+
+        while True:
+            win.erase()
+            win.box()
+            win.addstr(0, 2, f" {title} ", curses.color_pair(8) | curses.A_BOLD)
+            win.addstr(2, 4, question[: w - 8], curses.color_pair(2))
+
+            no_attr = curses.color_pair(3) if selected_btn == 0 else curses.color_pair(2)
+            yes_attr = curses.color_pair(3) if selected_btn == 1 else curses.color_pair(2)
+
+            win.addstr(4, 12, " [ Não ] ", no_attr)
+            win.addstr(4, 28, " [ Sim ] ", yes_attr)
+            win.refresh()
+
+            ch = win.getch()
+            if ch in (curses.KEY_LEFT, curses.KEY_RIGHT, 9):  # Tab
+                selected_btn = 1 - selected_btn
+            elif ch in (ord("\n"), curses.KEY_ENTER):
+                return selected_btn == 1
+            elif ch in (ord("s"), ord("S"), ord("y"), ord("Y")):
+                return True
+            elif ch in (ord("n"), ord("N"), 27):  # ESC
+                return False
+
+    def delete_selected(self):
+        conv = self.get_selected_conversation()
+        if not conv:
+            self.status_message = "Nenhuma conversa para apagar."
+            return
+
+        confirmed = self.confirm_dialog(
+            "Confirmar Exclusão",
+            f"Apagar conversa {conv['cid'][:8]} permanentemente?",
+        )
+        if confirmed:
+            try:
+                if os.path.exists(conv["cpath"]):
+                    shutil.rmtree(conv["cpath"])
+                if os.path.exists(DB_PATH):
+                    conn = sqlite3.connect(DB_PATH)
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM conversation_summaries WHERE conversation_id = ?", (conv["cid"],))
+                    conn.commit()
+                    conn.close()
+
+                self.status_message = f"Conversa {conv['cid'][:8]} apagada com sucesso!"
+                self.all_conversations = [c for c in self.all_conversations if c["cid"] != conv["cid"]]
+                self.apply_filter()
+            except Exception as e:
+                self.status_message = f"Erro ao apagar: {str(e)}"
+
+    def run(self):
+        self.stdscr.keypad(True)
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+        except Exception:
+            pass
+
+        while True:
+            self.render()
+            ch = self.stdscr.getch()
+
+            if ch == -1:
+                continue
+
+            # Eventos do Mouse (clique para focar painel ou selecionar item)
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _, mx, my, _, bstate = curses.getmouse()
+                    # Verifica clique com botão esquerdo ou duplo clique
+                    if bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_DOUBLE_CLICKED):
+                        for panel_id, (py, px, ph, pw) in self.panel_bounds.items():
+                            if py <= my < py + ph and px <= mx < px + pw:
+                                self.active_panel = panel_id
+                                if panel_id == self.PANEL_LOCAL:
+                                    clicked_row = my - (py + 1)
+                                    if 0 <= clicked_row < len(self.filtered_local):
+                                        self.selected_local_idx = clicked_row
+                                        self.h_offset_local = 0
+                                elif panel_id == self.PANEL_GLOBAL:
+                                    clicked_row = my - (py + 1)
+                                    if 0 <= clicked_row < len(self.filtered_global):
+                                        self.selected_global_idx = clicked_row
+                                        self.h_offset_global = 0
+                                self.update_preview()
+                                break
+                    # Suporte a Scroll do Mouse no painel focado ou no preview
+                    elif hasattr(curses, "BUTTON4_PRESSED") and (bstate & curses.BUTTON4_PRESSED):
+                        if self.active_panel == self.PANEL_PREVIEW:
+                            self.preview_scroll = max(0, self.preview_scroll - 3)
+                        elif self.active_panel == self.PANEL_LOCAL and self.selected_local_idx > 0:
+                            self.selected_local_idx -= 1
+                            self.update_preview()
+                        elif self.active_panel == self.PANEL_GLOBAL and self.selected_global_idx > 0:
+                            self.selected_global_idx -= 1
+                            self.update_preview()
+                    elif hasattr(curses, "BUTTON5_PRESSED") and (bstate & curses.BUTTON5_PRESSED):
+                        if self.active_panel == self.PANEL_PREVIEW:
+                            self.preview_scroll += 3
+                        elif self.active_panel == self.PANEL_LOCAL and self.selected_local_idx < len(self.filtered_local) - 1:
+                            self.selected_local_idx += 1
+                            self.update_preview()
+                        elif self.active_panel == self.PANEL_GLOBAL and self.selected_global_idx < len(self.filtered_global) - 1:
+                            self.selected_global_idx += 1
+                            self.update_preview()
+                except Exception:
+                    pass
+                continue
+
+            # Redimensionamento dinâmico da janela do terminal
+            if ch == curses.KEY_RESIZE:
+                self.preview_last_width = 0
+                continue
+
+            # Tecla ESC ou 'q' (quando não estiver digitando na busca)
+            if ch == 27:
+                if self.active_panel == self.PANEL_SEARCH:
+                    self.active_panel = self.PANEL_LOCAL
+                    continue
+                return None
+
+            if ch in (ord("q"), ord("Q")) and self.active_panel != self.PANEL_SEARCH:
+                return None
+
+            # Atalhos numéricos diretos para foco nos painéis
+            if ch in (ord("1"), ord("2"), ord("3"), ord("4")) and self.active_panel != self.PANEL_SEARCH:
+                self.active_panel = ch - ord("0")
+                self.update_preview()
+                continue
+
+            # Alternar painel com TAB
+            if ch == 9:  # TAB
+                order = [self.PANEL_SEARCH, self.PANEL_LOCAL, self.PANEL_GLOBAL, self.PANEL_PREVIEW]
+                cur_idx = order.index(self.active_panel)
+                self.active_panel = order[(cur_idx + 1) % len(order)]
+                self.update_preview()
+                continue
+
+            if ch == curses.KEY_BTAB:  # Shift + TAB
+                order = [self.PANEL_SEARCH, self.PANEL_LOCAL, self.PANEL_GLOBAL, self.PANEL_PREVIEW]
+                cur_idx = order.index(self.active_panel)
+                self.active_panel = order[(cur_idx - 1) % len(order)]
+                self.update_preview()
+                continue
+
+            # Tecla ENTER para escolher a conversa
+            if ch in (ord("\n"), curses.KEY_ENTER):
+                if self.active_panel == self.PANEL_SEARCH:
+                    self.active_panel = self.PANEL_LOCAL if self.filtered_local else self.PANEL_GLOBAL
+                    self.update_preview()
+                    continue
+                conv = self.get_selected_conversation()
+                if conv:
+                    return conv["cid"]
+                continue
+
+            # Deletar conversa
+            if (ch in (ord("d"), ord("D"), 4)) and self.active_panel in (self.PANEL_LOCAL, self.PANEL_GLOBAL):
+                self.delete_selected()
+                continue
+
+            # Ações específicas por painel
+            if self.active_panel == self.PANEL_SEARCH:
+                if ch in (curses.KEY_BACKSPACE, 127, 8):
+                    if self.search_query:
+                        self.search_query = self.search_query[:-1]
+                        self.apply_filter()
+                elif ch in (curses.KEY_DOWN,):
+                    self.active_panel = self.PANEL_LOCAL if self.filtered_local else self.PANEL_GLOBAL
+                elif 32 <= ch <= 126:
+                    self.search_query += chr(ch)
+                    self.apply_filter()
+
+            elif self.active_panel == self.PANEL_LOCAL:
+                if ch in (curses.KEY_UP, ord("k")):
+                    if self.selected_local_idx > 0:
+                        self.selected_local_idx -= 1
+                        self.h_offset_local = 0
+                        self.update_preview()
+                elif ch in (curses.KEY_DOWN, ord("j")):
+                    if self.selected_local_idx < len(self.filtered_local) - 1:
+                        self.selected_local_idx += 1
+                        self.h_offset_local = 0
+                        self.update_preview()
+                elif ch in (curses.KEY_RIGHT, ord("l")):
+                    self.h_offset_local += 5
+                elif ch in (curses.KEY_LEFT, ord("h")):
+                    self.h_offset_local = max(0, self.h_offset_local - 5)
+                elif ch == ord("/"):
+                    self.active_panel = self.PANEL_SEARCH
+
+            elif self.active_panel == self.PANEL_GLOBAL:
+                if ch in (curses.KEY_UP, ord("k")):
+                    if self.selected_global_idx > 0:
+                        self.selected_global_idx -= 1
+                        self.h_offset_global = 0
+                        self.update_preview()
+                elif ch in (curses.KEY_DOWN, ord("j")):
+                    if self.selected_global_idx < len(self.filtered_global) - 1:
+                        self.selected_global_idx += 1
+                        self.h_offset_global = 0
+                        self.update_preview()
+                elif ch in (curses.KEY_RIGHT, ord("l")):
+                    self.h_offset_global += 5
+                elif ch in (curses.KEY_LEFT, ord("h")):
+                    self.h_offset_global = max(0, self.h_offset_global - 5)
+                elif ch == ord("/"):
+                    self.active_panel = self.PANEL_SEARCH
+
+            elif self.active_panel == self.PANEL_PREVIEW:
+                if ch in (curses.KEY_UP, ord("k")):
+                    self.preview_scroll = max(0, self.preview_scroll - 1)
+                elif ch in (curses.KEY_DOWN, ord("j")):
+                    self.preview_scroll += 1
+                elif ch in (curses.KEY_PPAGE,):  # Page Up
+                    self.preview_scroll = max(0, self.preview_scroll - 10)
+                elif ch in (curses.KEY_NPAGE,):  # Page Down
+                    self.preview_scroll += 10
+
+
+def main():
+    current_dir = os.getcwd()
+
+    def run_curses(stdscr):
+        tui = AgSelectTUI(stdscr, current_dir)
+        return tui.run()
+
+    chosen_cid = curses.wrapper(run_curses)
+
+    if chosen_cid:
+        os.execvp("agy", ["agy", "--conversation", chosen_cid])
+
+
+if __name__ == "__main__":
+    main()
