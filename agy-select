@@ -124,8 +124,9 @@ def load_conversations(current_dir: str):
 
 def load_conversation_messages(transcript_path: str):
     messages = []
+    total_chars = 0
     if not os.path.exists(transcript_path):
-        return messages
+        return messages, 0
 
     try:
         with open(transcript_path, "r", encoding="utf-8", errors="ignore") as fh:
@@ -135,6 +136,8 @@ def load_conversation_messages(transcript_path: str):
                     m_type = data.get("type")
                     src = data.get("source")
                     content = data.get("content")
+                    if content:
+                        total_chars += len(str(content))
                     if m_type == "USER_INPUT" and content:
                         messages.append(("user", clean_preview(content)))
                     elif m_type == "PLANNER_RESPONSE" and src == "MODEL" and content:
@@ -143,7 +146,7 @@ def load_conversation_messages(transcript_path: str):
                     pass
     except Exception:
         pass
-    return messages
+    return messages, total_chars
 
 
 class AgSelectTUI:
@@ -169,6 +172,8 @@ class AgSelectTUI:
 
         self.raw_messages = []
         self.preview_cache_cid = None
+        self.preview_est_tokens = 0
+        self.preview_est_pct = 0.0
         self.preview_wrapped_lines = []
         self.preview_last_width = 0
         self.preview_scroll = 0
@@ -203,6 +208,10 @@ class AgSelectTUI:
         curses.init_pair(7, curses.COLOR_GREEN, -1)
         # 8: Status/Erro
         curses.init_pair(8, curses.COLOR_RED, -1)
+        # 9: Balão Usuário (Bordas Ciano)
+        curses.init_pair(9, curses.COLOR_CYAN, -1)
+        # 10: Balão IA (Bordas Verde)
+        curses.init_pair(10, curses.COLOR_GREEN, -1)
 
     def apply_filter(self):
         query = self.search_query.strip().lower()
@@ -255,6 +264,8 @@ class AgSelectTUI:
         if not conv:
             self.raw_messages = []
             self.preview_cache_cid = None
+            self.preview_est_tokens = 0
+            self.preview_est_pct = 0.0
             self.preview_wrapped_lines = [("normal", "Nenhuma conversa selecionada.")]
             self.preview_scroll = 0
             self.preview_last_width = 0
@@ -265,11 +276,15 @@ class AgSelectTUI:
 
         self.preview_cache_cid = conv["cid"]
         self.preview_scroll = 0
-        self.raw_messages = load_conversation_messages(conv["transcript_path"])
+        self.raw_messages, total_chars = load_conversation_messages(conv["transcript_path"])
+        # Estimativa de tokens Gemini: ~3.8 caracteres por token
+        # Base de janela de contexto do agy: 1.000.000 (1M)
+        self.preview_est_tokens = int(total_chars / 3.8)
+        self.preview_est_pct = min(100.0, (self.preview_est_tokens / 1_000_000.0) * 100.0)
         self.preview_last_width = 0
 
     def wrap_preview_content(self, width: int):
-        if width <= 2:
+        if width <= 4:
             self.preview_wrapped_lines = []
             return
 
@@ -282,29 +297,39 @@ class AgSelectTUI:
         if not self.raw_messages:
             lines.append(("normal", "Nenhuma mensagem encontrada neste histórico."))
         else:
+            bubble_inner_w = width - 4
             for role, content in self.raw_messages:
-                if role == "user":
-                    lines.append(("user_hdr", "👤 User:"))
-                else:
-                    lines.append(("ai_hdr", "🤖 AI:"))
-
-                for raw_line in content.split("\n"):
+                content_lines = content.split("\n")
+                wrapped_body = []
+                for raw_line in content_lines:
                     if not raw_line:
-                        lines.append(("body", ""))
+                        wrapped_body.append("")
                         continue
 
                     wrapped = textwrap.wrap(
                         raw_line,
-                        width=width,
+                        width=bubble_inner_w,
                         break_long_words=True,
                         break_on_hyphens=False,
                         replace_whitespace=False,
                     )
                     if not wrapped:
-                        lines.append(("body", ""))
+                        wrapped_body.append("")
                     else:
-                        for w in wrapped:
-                            lines.append(("body", w))
+                        wrapped_body.extend(wrapped)
+
+                if role == "user":
+                    lines.append(("user_top", "╭─ " + "─" * (bubble_inner_w) + "╮"))
+                    for w in wrapped_body:
+                        padded = w.ljust(bubble_inner_w)
+                        lines.append(("user_body", f"│  {padded} │"))
+                    lines.append(("user_bot", "╰─ " + "─" * (bubble_inner_w) + "╯"))
+                else:
+                    lines.append(("ai_top", "╭─ " + "─" * (bubble_inner_w) + "╮"))
+                    for w in wrapped_body:
+                        padded = w.ljust(bubble_inner_w)
+                        lines.append(("ai_body", f"│  {padded} │"))
+                    lines.append(("ai_bot", "╰─ " + "─" * (bubble_inner_w) + "╯"))
 
                 lines.append(("blank", ""))
 
@@ -452,13 +477,14 @@ class AgSelectTUI:
         preview_inner_w = max(1, right_w - (preview_pad_x * 2))
         self.wrap_preview_content(preview_inner_w)
 
+        preview_title = f"Preview (~{self.preview_est_pct:.1f}% Context)"
         self.draw_box(
             0,
             left_w,
             usable_h,
             right_w,
             4,
-            "Preview",
+            preview_title,
             f"Scroll {self.preview_scroll + 1}/{max(1, len(self.preview_wrapped_lines))}",
             is_active=(self.active_panel == self.PANEL_PREVIEW),
         )
@@ -558,15 +584,31 @@ class AgSelectTUI:
                 break
 
             style, text = self.preview_wrapped_lines[line_idx]
-            attr = curses.color_pair(2)
-            if style == "user_hdr":
-                attr = curses.color_pair(4) | curses.A_BOLD
-            elif style == "ai_hdr":
-                attr = curses.color_pair(5) | curses.A_BOLD
-
             disp_text = text[:width].ljust(width)
+
             try:
-                self.stdscr.addstr(y_start + i, x_start, disp_text, attr)
+                if style in ("user_top", "user_bot"):
+                    self.stdscr.addstr(y_start + i, x_start, disp_text, curses.color_pair(4) | curses.A_BOLD)
+                elif style in ("ai_top", "ai_bot"):
+                    self.stdscr.addstr(y_start + i, x_start, disp_text, curses.color_pair(5) | curses.A_BOLD)
+                elif style == "user_body":
+                    border_color = curses.color_pair(4) | curses.A_BOLD
+                    text_color = curses.color_pair(2)
+                    self.stdscr.addstr(y_start + i, x_start, "│", border_color)
+                    if width > 2:
+                        body_txt = disp_text[1:-1]
+                        self.stdscr.addstr(y_start + i, x_start + 1, body_txt[: width - 2], text_color)
+                        self.stdscr.addstr(y_start + i, x_start + width - 1, "│", border_color)
+                elif style == "ai_body":
+                    border_color = curses.color_pair(5) | curses.A_BOLD
+                    text_color = curses.color_pair(2)
+                    self.stdscr.addstr(y_start + i, x_start, "│", border_color)
+                    if width > 2:
+                        body_txt = disp_text[1:-1]
+                        self.stdscr.addstr(y_start + i, x_start + 1, body_txt[: width - 2], text_color)
+                        self.stdscr.addstr(y_start + i, x_start + width - 1, "│", border_color)
+                else:
+                    self.stdscr.addstr(y_start + i, x_start, disp_text, curses.color_pair(2))
             except curses.error:
                 pass
 
@@ -667,25 +709,46 @@ class AgSelectTUI:
                                         self.h_offset_global = 0
                                 self.update_preview()
                                 break
-                    # Suporte a Scroll do Mouse no painel focado ou no preview
+                    # Suporte a Scroll do Mouse baseado na posição onde o cursor do mouse está
                     elif hasattr(curses, "BUTTON4_PRESSED") and (bstate & curses.BUTTON4_PRESSED):
-                        if self.active_panel == self.PANEL_PREVIEW:
+                        hovered_panel = None
+                        for panel_id, (py, px, ph, pw) in self.panel_bounds.items():
+                            if py <= my < py + ph and px <= mx < px + pw:
+                                hovered_panel = panel_id
+                                break
+
+                        if hovered_panel == self.PANEL_PREVIEW or (hovered_panel is None and self.active_panel == self.PANEL_PREVIEW):
                             self.preview_scroll = max(0, self.preview_scroll - 3)
-                        elif self.active_panel == self.PANEL_LOCAL and self.selected_local_idx > 0:
-                            self.selected_local_idx -= 1
-                            self.update_preview()
-                        elif self.active_panel == self.PANEL_GLOBAL and self.selected_global_idx > 0:
-                            self.selected_global_idx -= 1
-                            self.update_preview()
+                        elif hovered_panel == self.PANEL_LOCAL:
+                            if self.selected_local_idx > 0:
+                                self.selected_local_idx -= 1
+                                self.h_offset_local = 0
+                                self.update_preview()
+                        elif hovered_panel == self.PANEL_GLOBAL:
+                            if self.selected_global_idx > 0:
+                                self.selected_global_idx -= 1
+                                self.h_offset_global = 0
+                                self.update_preview()
+
                     elif hasattr(curses, "BUTTON5_PRESSED") and (bstate & curses.BUTTON5_PRESSED):
-                        if self.active_panel == self.PANEL_PREVIEW:
+                        hovered_panel = None
+                        for panel_id, (py, px, ph, pw) in self.panel_bounds.items():
+                            if py <= my < py + ph and px <= mx < px + pw:
+                                hovered_panel = panel_id
+                                break
+
+                        if hovered_panel == self.PANEL_PREVIEW or (hovered_panel is None and self.active_panel == self.PANEL_PREVIEW):
                             self.preview_scroll += 3
-                        elif self.active_panel == self.PANEL_LOCAL and self.selected_local_idx < len(self.filtered_local) - 1:
-                            self.selected_local_idx += 1
-                            self.update_preview()
-                        elif self.active_panel == self.PANEL_GLOBAL and self.selected_global_idx < len(self.filtered_global) - 1:
-                            self.selected_global_idx += 1
-                            self.update_preview()
+                        elif hovered_panel == self.PANEL_LOCAL:
+                            if self.selected_local_idx < len(self.filtered_local) - 1:
+                                self.selected_local_idx += 1
+                                self.h_offset_local = 0
+                                self.update_preview()
+                        elif hovered_panel == self.PANEL_GLOBAL:
+                            if self.selected_global_idx < len(self.filtered_global) - 1:
+                                self.selected_global_idx += 1
+                                self.h_offset_global = 0
+                                self.update_preview()
                 except Exception:
                     pass
                 continue
