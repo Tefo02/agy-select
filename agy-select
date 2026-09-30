@@ -42,6 +42,35 @@ def clean_preview(text: str) -> str:
     return text.strip()
 
 
+def get_search_blob(conv: dict) -> str:
+    """Carrega o texto completo de busca sob demanda apenas quando uma pesquisa for digitada."""
+    if conv.get("search_blob") is None:
+        full_search_text = []
+        t_path = conv.get("transcript_path", "")
+        if t_path and os.path.exists(t_path):
+            try:
+                with open(t_path, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        try:
+                            data = json.loads(line)
+                            m_type = data.get("type")
+                            src = data.get("source")
+                            if m_type == "USER_INPUT":
+                                cleaned = clean_text(str(data.get("content", "")))
+                                if cleaned:
+                                    full_search_text.append(cleaned)
+                            elif m_type == "PLANNER_RESPONSE" and src == "MODEL":
+                                cleaned = clean_text(str(data.get("content", "")))
+                                if cleaned:
+                                    full_search_text.append(cleaned)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        conv["search_blob"] = " ".join(full_search_text).lower()
+    return conv["search_blob"]
+
+
 def load_conversations(current_dir: str):
     db_meta = {}
     if os.path.exists(DB_PATH):
@@ -63,20 +92,29 @@ def load_conversations(current_dir: str):
 
     conversations = []
     for f in files:
-        mtime = os.path.getmtime(f)
+        try:
+            mtime = os.path.getmtime(f)
+        except OSError:
+            continue
+
         parts = f.split(os.sep)
         idx = parts.index(".system_generated") if ".system_generated" in parts else -1
         cid = parts[idx - 1] if idx > 0 else parts[-2]
         cpath = os.path.dirname(os.path.dirname(os.path.dirname(f)))
 
-        last_user_input = ""
-        full_search_text = []
-        ignore = False
+        meta = db_meta.get(cid, {})
+        title = meta.get("title", "")
+        is_local = meta.get("is_local", False)
 
-        try:
-            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    try:
+        ignore = False
+        # Leitura rápida de cabeçalho apenas se o título não estiver no SQLite
+        if not title:
+            try:
+                with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                    for _ in range(25):
+                        line = fh.readline()
+                        if not line:
+                            break
                         data = json.loads(line)
                         if data.get("type") == "USER_INPUT":
                             content = str(data.get("content", ""))
@@ -86,35 +124,26 @@ def load_conversations(current_dir: str):
                             ):
                                 ignore = True
                                 break
-                            cleaned = clean_text(content)
-                            last_user_input = cleaned
-                            full_search_text.append(cleaned)
-                        elif data.get("type") == "PLANNER_RESPONSE" and data.get("source") == "MODEL":
-                            content = str(data.get("content", ""))
-                            cleaned = clean_text(content)
-                            if cleaned:
-                                full_search_text.append(cleaned)
-                    except Exception:
-                        pass
-        except Exception:
-            continue
+                            if not title:
+                                cleaned = clean_text(content)
+                                if cleaned:
+                                    title = cleaned
+                                    break
+            except Exception:
+                pass
 
         if ignore:
             continue
-
-        meta = db_meta.get(cid, {})
-        title = meta.get("title") or last_user_input or "Sem mensagens"
-        is_local = meta.get("is_local", False)
 
         conversations.append(
             {
                 "cid": cid,
                 "cpath": cpath,
-                "title": title,
+                "title": title or "Sem mensagens",
                 "is_local": is_local,
                 "mtime": mtime,
                 "transcript_path": f,
-                "search_blob": " ".join(full_search_text).lower(),
+                "search_blob": None,
             }
         )
 
@@ -223,13 +252,13 @@ class AgSelectTUI:
                 c
                 for c in self.all_conversations
                 if c["is_local"]
-                and (query in c["title"].lower() or query in c["cid"].lower() or query in c["search_blob"])
+                and (query in c["title"].lower() or query in c["cid"].lower() or query in get_search_blob(c))
             ]
             self.filtered_global = [
                 c
                 for c in self.all_conversations
                 if not c["is_local"]
-                and (query in c["title"].lower() or query in c["cid"].lower() or query in c["search_blob"])
+                and (query in c["title"].lower() or query in c["cid"].lower() or query in get_search_blob(c))
             ]
 
         # Ajusta índices se saírem do limite
@@ -677,7 +706,13 @@ class AgSelectTUI:
     def run(self):
         self.stdscr.keypad(True)
         try:
-            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+            # Não incluir REPORT_MOUSE_POSITION para evitar redesenhos contínuos desnecessários ao mover o cursor
+            mouse_mask = curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_DOUBLE_CLICKED
+            if hasattr(curses, "BUTTON4_PRESSED"):
+                mouse_mask |= curses.BUTTON4_PRESSED
+            if hasattr(curses, "BUTTON5_PRESSED"):
+                mouse_mask |= curses.BUTTON5_PRESSED
+            curses.mousemask(mouse_mask)
         except Exception:
             pass
 
@@ -692,6 +727,7 @@ class AgSelectTUI:
             if ch == curses.KEY_MOUSE:
                 try:
                     _, mx, my, _, bstate = curses.getmouse()
+                    handled = False
                     # Verifica clique com botão esquerdo ou duplo clique
                     if bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_DOUBLE_CLICKED):
                         for panel_id, (py, px, ph, pw) in self.panel_bounds.items():
@@ -708,6 +744,7 @@ class AgSelectTUI:
                                         self.selected_global_idx = clicked_row
                                         self.h_offset_global = 0
                                 self.update_preview()
+                                handled = True
                                 break
                     # Suporte a Scroll do Mouse baseado na posição onde o cursor do mouse está
                     elif hasattr(curses, "BUTTON4_PRESSED") and (bstate & curses.BUTTON4_PRESSED):
@@ -729,6 +766,7 @@ class AgSelectTUI:
                                 self.selected_global_idx -= 1
                                 self.h_offset_global = 0
                                 self.update_preview()
+                        handled = True
 
                     elif hasattr(curses, "BUTTON5_PRESSED") and (bstate & curses.BUTTON5_PRESSED):
                         hovered_panel = None
@@ -749,6 +787,10 @@ class AgSelectTUI:
                                 self.selected_global_idx += 1
                                 self.h_offset_global = 0
                                 self.update_preview()
+                        handled = True
+
+                    if not handled:
+                        continue
                 except Exception:
                     pass
                 continue
