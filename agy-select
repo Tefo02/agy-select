@@ -642,9 +642,9 @@ class AgSelectTUI:
 
         # Rodapé com atalhos
         if self.compiled_query:
-            footer = " [ENTER] Continuar | [TAB / 1-4] Foco | [n/N] Próx/Ant match | [d] Apagar | [q / ESC] Sair "
+            footer = " [ENTER] Continuar | [TAB / 1-4] Foco | [n/N] Próx/Ant match | [r] Renomear | [d] Apagar | [q / ESC] Sair "
         else:
-            footer = " [ENTER] Continuar | [TAB / 1-4] Foco | [←/→] Rolar Título | [d] Apagar | [q / ESC] Sair "
+            footer = " [ENTER] Continuar | [TAB / 1-4] Foco | [←/→] Rolar Título | [r] Renomear | [d] Apagar | [q / ESC] Sair "
         if self.status_message:
             footer = f" {self.status_message} "
         try:
@@ -913,6 +913,153 @@ class AgSelectTUI:
             elif ch in (ord("n"), ord("N"), 27):  # ESC
                 return False
 
+    def rename_dialog(self, title, initial_value, cid=""):
+        max_y, max_x = self.stdscr.getmaxyx()
+        if max_y < 8 or max_x < 32:
+            self.status_message = "Aumente o terminal para renomear."
+            return None
+
+        h = 7
+        w = min(60, max(32, max_x - 4))
+        y = max(0, (max_y - h) // 2)
+        x = max(0, (max_x - w) // 2)
+
+        try:
+            win = curses.newwin(h, w, y, x)
+        except curses.error:
+            self.status_message = "Terminal muito pequeno para diálogo."
+            return None
+
+        win.keypad(True)
+        curses.curs_set(1)
+
+        buffer = initial_value or ""
+        cursor_idx = len(buffer)
+        view_offset = 0
+
+        try:
+            while True:
+                cur_y, cur_x = self.stdscr.getmaxyx()
+                if cur_y < 8 or cur_x < 32:
+                    return None
+
+                win.erase()
+                win.box()
+                try:
+                    win.addstr(0, 2, f" {title[: max(1, w - 6)]} ", curses.color_pair(4) | curses.A_BOLD)
+                    cid_txt = f"ID: {cid}" if cid else ""
+                    if cid_txt:
+                        win.addstr(1, 2, cid_txt[: max(1, w - 4)], curses.color_pair(2))
+
+                    win.addstr(2, 2, "Novo título:", curses.color_pair(2) | curses.A_BOLD)
+
+                    field_w = max(1, w - 6)
+                    # Ajusta visualização com rolagem horizontal
+                    if cursor_idx < view_offset:
+                        view_offset = cursor_idx
+                    elif cursor_idx > view_offset + field_w:
+                        view_offset = cursor_idx - field_w
+
+                    disp_buf = buffer[view_offset : view_offset + field_w]
+                    rel_cursor = cursor_idx - view_offset
+
+                    input_line = ("> " + disp_buf).ljust(w - 4)[: w - 4]
+                    win.addstr(3, 2, input_line, curses.color_pair(3))
+                    win.addstr(5, 2, "[ENTER] Salvar   [ESC] Cancelar", curses.color_pair(6))
+
+                    cursor_col = min(w - 2, 4 + rel_cursor)
+                    win.move(3, cursor_col)
+                    win.refresh()
+                except curses.error:
+                    pass
+
+                try:
+                    ch = win.get_wch()
+                except curses.error:
+                    continue
+
+                if ch == -1:
+                    continue
+
+                ch_code = ord(ch) if isinstance(ch, str) else ch
+
+                if ch_code == curses.KEY_RESIZE:
+                    return None
+
+                if ch_code == 27:  # ESC
+                    return None
+
+                if ch_code in (ord("\n"), ord("\r"), curses.KEY_ENTER):
+                    return buffer.strip()
+
+                if ch_code == curses.KEY_LEFT:
+                    cursor_idx = max(0, cursor_idx - 1)
+                elif ch_code == curses.KEY_RIGHT:
+                    cursor_idx = min(len(buffer), cursor_idx + 1)
+                elif ch_code in (curses.KEY_HOME, 1):  # Home ou Ctrl+A
+                    cursor_idx = 0
+                elif ch_code in (curses.KEY_END, 5):   # End ou Ctrl+E
+                    cursor_idx = len(buffer)
+                elif ch_code in (curses.KEY_BACKSPACE, 127, 8) or ch in ("\x7f", "\x08", "\b"):
+                    if cursor_idx > 0:
+                        buffer = buffer[: cursor_idx - 1] + buffer[cursor_idx:]
+                        cursor_idx -= 1
+                elif ch_code in (curses.KEY_DC,):  # Delete
+                    if cursor_idx < len(buffer):
+                        buffer = buffer[:cursor_idx] + buffer[cursor_idx + 1:]
+                elif ch_code == 21:  # Ctrl + U: limpa campo
+                    buffer = ""
+                    cursor_idx = 0
+                elif (isinstance(ch, str) and ch.isprintable()) or (isinstance(ch, int) and 32 <= ch <= 126):
+                    char = ch if isinstance(ch, str) else chr(ch)
+                    buffer = buffer[:cursor_idx] + char + buffer[cursor_idx:]
+                    cursor_idx += 1
+        finally:
+            curses.curs_set(0)
+
+    def rename_selected(self):
+        conv = self.get_selected_conversation()
+        if not conv:
+            self.status_message = "Nenhuma conversa para renomear."
+            return
+
+        cid = conv["cid"]
+        current_title = conv.get("title", "")
+        new_title = self.rename_dialog("Renomear Conversa", current_title, cid=cid[:8])
+
+        if new_title is None or new_title == current_title:
+            return
+
+        if not new_title:
+            self.status_message = "O título não pode ser vazio."
+            return
+
+        try:
+            os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM conversation_summaries WHERE conversation_id = ?", (cid,))
+            exists = cur.fetchone()
+            if exists:
+                cur.execute(
+                    "UPDATE conversation_summaries SET title = ? WHERE conversation_id = ?",
+                    (new_title, cid),
+                )
+            else:
+                uris_json = json.dumps([f"file://{os.path.realpath(self.current_dir)}"])
+                cur.execute(
+                    "INSERT INTO conversation_summaries (conversation_id, title, workspace_uris, last_modified_time, last_user_input_time) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
+                    (cid, new_title, uris_json),
+                )
+            conn.commit()
+            conn.close()
+
+            conv["title"] = new_title
+            self.status_message = f"Conversa {cid[:8]} renomeada com sucesso!"
+            self.apply_filter()
+        except Exception as e:
+            self.status_message = f"Erro ao renomear: {str(e)}"
+
     def delete_selected(self):
         conv = self.get_selected_conversation()
         if not conv:
@@ -1118,6 +1265,11 @@ class AgSelectTUI:
             # Deletar conversa
             if (ch in ("d", "D") or ch_code == 4) and self.active_panel in (self.PANEL_LOCAL, self.PANEL_GLOBAL, self.PANEL_PREVIEW):
                 self.delete_selected()
+                continue
+
+            # Renomear conversa
+            if ch in ("r", "R") and self.active_panel in (self.PANEL_LOCAL, self.PANEL_GLOBAL, self.PANEL_PREVIEW):
+                self.rename_selected()
                 continue
 
             # Ações específicas por painel
