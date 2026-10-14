@@ -291,6 +291,7 @@ class AgSelectTUI:
         self.preview_wrapped_lines = []
         self.preview_last_width = 0
         self.preview_scroll = 0
+        self.last_match_line = -1
 
         self.panel_bounds = {}
 
@@ -331,6 +332,8 @@ class AgSelectTUI:
         curses.init_pair(9, curses.COLOR_CYAN, -1)
         # 10: Balão IA (Bordas Verde)
         curses.init_pair(10, curses.COLOR_GREEN, -1)
+        # 11: Destaque de Busca / Regex Match (Preto no Amarelo)
+        curses.init_pair(11, curses.COLOR_BLACK, curses.COLOR_YELLOW)
 
     def apply_filter(self):
         query = self.search_query.strip()
@@ -611,6 +614,20 @@ class AgSelectTUI:
         self.wrap_preview_content(preview_inner_w)
 
         preview_title = f"Preview (~{self.preview_est_pct:.1f}% Context)"
+        if self.compiled_query:
+            matches = self.get_preview_match_lines()
+            if matches:
+                curr_idx = 0
+                for idx, m in enumerate(matches):
+                    if m <= self.preview_scroll + 1:
+                        curr_idx = idx + 1
+                    else:
+                        break
+                curr_idx = max(1, curr_idx)
+                preview_title = f"Preview (~{self.preview_est_pct:.1f}%) [{curr_idx}/{len(matches)} matches]"
+            else:
+                preview_title = f"Preview (~{self.preview_est_pct:.1f}%) [0 matches]"
+
         self.draw_box(
             0,
             left_w,
@@ -624,7 +641,10 @@ class AgSelectTUI:
         self.render_preview(1, left_w + preview_pad_x, usable_h - 2, preview_inner_w)
 
         # Rodapé com atalhos
-        footer = " [ENTER] Continuar | [TAB / 1-4] Foco | [←/→] Rolar Título | [d] Apagar | [q / ESC] Sair "
+        if self.compiled_query:
+            footer = " [ENTER] Continuar | [TAB / 1-4] Foco | [n/N] Próx/Ant match | [d] Apagar | [q / ESC] Sair "
+        else:
+            footer = " [ENTER] Continuar | [TAB / 1-4] Foco | [←/→] Rolar Título | [d] Apagar | [q / ESC] Sair "
         if self.status_message:
             footer = f" {self.status_message} "
         try:
@@ -704,6 +724,94 @@ class AgSelectTUI:
             except curses.error:
                 pass
 
+    def draw_text_with_highlights(self, y: int, x: int, text: str, default_attr: int, highlight_attr: int):
+        if not text:
+            return
+
+        if not self.compiled_query:
+            try:
+                self.stdscr.addstr(y, x, text, default_attr)
+            except curses.error:
+                pass
+            return
+
+        last_pos = 0
+        cur_x = x
+        try:
+            for match in self.compiled_query.finditer(text):
+                start, end = match.span()
+                if start == end:
+                    continue
+                if start > last_pos:
+                    part = text[last_pos:start]
+                    self.stdscr.addstr(y, cur_x, part, default_attr)
+                    cur_x += len(part)
+
+                match_text = text[start:end]
+                self.stdscr.addstr(y, cur_x, match_text, highlight_attr)
+                cur_x += len(match_text)
+                last_pos = end
+
+            if last_pos < len(text):
+                part = text[last_pos:]
+                self.stdscr.addstr(y, cur_x, part, default_attr)
+        except curses.error:
+            pass
+
+    def get_preview_match_lines(self):
+        if not self.compiled_query or not self.preview_wrapped_lines:
+            return []
+        matches = []
+        for idx, (style, text) in enumerate(self.preview_wrapped_lines):
+            if style in ("user_body", "ai_body"):
+                body_content = text[1:-1].strip()
+                if self.compiled_query.search(body_content):
+                    matches.append(idx)
+            elif style == "normal":
+                if self.compiled_query.search(text):
+                    matches.append(idx)
+        return matches
+
+    def next_preview_match(self):
+        matches = self.get_preview_match_lines()
+        if not matches:
+            self.status_message = "Nenhum match encontrado no preview."
+            return
+
+        ref = max(self.preview_scroll, getattr(self, "last_match_line", -1))
+        next_m = None
+        for m in matches:
+            if m > ref:
+                next_m = m
+                break
+        if next_m is None:
+            next_m = matches[0]
+
+        self.last_match_line = next_m
+        self.preview_scroll = max(0, next_m - 1)
+        idx = matches.index(next_m) + 1
+        self.status_message = f"Match {idx} de {len(matches)} no preview ([n] próx, [N] ant)."
+
+    def prev_preview_match(self):
+        matches = self.get_preview_match_lines()
+        if not matches:
+            self.status_message = "Nenhum match encontrado no preview."
+            return
+
+        ref = min(self.preview_scroll + 1, getattr(self, "last_match_line", 999999))
+        prev_m = None
+        for m in reversed(matches):
+            if m < ref:
+                prev_m = m
+                break
+        if prev_m is None:
+            prev_m = matches[-1]
+
+        self.last_match_line = prev_m
+        self.preview_scroll = max(0, prev_m - 1)
+        idx = matches.index(prev_m) + 1
+        self.status_message = f"Match {idx} de {len(matches)} no preview ([n] próx, [N] ant)."
+
     def render_preview(self, y_start, x_start, height, width):
         if height <= 0 or width <= 0 or not self.preview_wrapped_lines:
             return
@@ -727,21 +835,25 @@ class AgSelectTUI:
                 elif style == "user_body":
                     border_color = curses.color_pair(4) | curses.A_BOLD
                     text_color = curses.color_pair(2)
+                    highlight_color = curses.color_pair(11) | curses.A_BOLD
                     self.stdscr.addstr(y_start + i, x_start, "│", border_color)
                     if width > 2:
-                        body_txt = disp_text[1:-1]
-                        self.stdscr.addstr(y_start + i, x_start + 1, body_txt[: width - 2], text_color)
+                        body_txt = disp_text[1:-1][: width - 2]
+                        self.draw_text_with_highlights(y_start + i, x_start + 1, body_txt, text_color, highlight_color)
                         self.stdscr.addstr(y_start + i, x_start + width - 1, "│", border_color)
                 elif style == "ai_body":
                     border_color = curses.color_pair(5) | curses.A_BOLD
                     text_color = curses.color_pair(2)
+                    highlight_color = curses.color_pair(11) | curses.A_BOLD
                     self.stdscr.addstr(y_start + i, x_start, "│", border_color)
                     if width > 2:
-                        body_txt = disp_text[1:-1]
-                        self.stdscr.addstr(y_start + i, x_start + 1, body_txt[: width - 2], text_color)
+                        body_txt = disp_text[1:-1][: width - 2]
+                        self.draw_text_with_highlights(y_start + i, x_start + 1, body_txt, text_color, highlight_color)
                         self.stdscr.addstr(y_start + i, x_start + width - 1, "│", border_color)
                 else:
-                    self.stdscr.addstr(y_start + i, x_start, disp_text, curses.color_pair(2))
+                    text_color = curses.color_pair(2)
+                    highlight_color = curses.color_pair(11) | curses.A_BOLD
+                    self.draw_text_with_highlights(y_start + i, x_start, disp_text, text_color, highlight_color)
             except curses.error:
                 pass
 
@@ -907,6 +1019,7 @@ class AgSelectTUI:
 
                         if hovered_panel == self.PANEL_PREVIEW or (hovered_panel is None and self.active_panel == self.PANEL_PREVIEW):
                             self.preview_scroll = max(0, self.preview_scroll - 3)
+                            self.last_match_line = self.preview_scroll
                         elif hovered_panel == self.PANEL_LOCAL:
                             if self.selected_local_idx > 0:
                                 self.selected_local_idx -= 1
@@ -928,6 +1041,7 @@ class AgSelectTUI:
 
                         if hovered_panel == self.PANEL_PREVIEW or (hovered_panel is None and self.active_panel == self.PANEL_PREVIEW):
                             self.preview_scroll += 3
+                            self.last_match_line = self.preview_scroll
                         elif hovered_panel == self.PANEL_LOCAL:
                             if self.selected_local_idx < len(self.filtered_local) - 1:
                                 self.selected_local_idx += 1
@@ -965,6 +1079,14 @@ class AgSelectTUI:
             if ch in ("1", "2", "3", "4") and self.active_panel != self.PANEL_SEARCH:
                 self.set_active_panel(int(ch))
                 self.update_preview()
+                continue
+
+            # Buscar próximo / anterior match com 'n' / 'N' quando não estiver digitando na busca
+            if ch in ("n", "N") and self.active_panel != self.PANEL_SEARCH:
+                if ch == "n":
+                    self.next_preview_match()
+                else:
+                    self.prev_preview_match()
                 continue
 
             # Alternar painel com TAB
@@ -1069,16 +1191,22 @@ class AgSelectTUI:
             elif self.active_panel == self.PANEL_PREVIEW:
                 if ch_code in (curses.KEY_UP,) or ch in ("k", "K"):
                     self.preview_scroll = max(0, self.preview_scroll - 1)
+                    self.last_match_line = self.preview_scroll
                 elif ch_code in (curses.KEY_DOWN,) or ch in ("j", "J"):
                     self.preview_scroll += 1
+                    self.last_match_line = self.preview_scroll
                 elif ch_code in (curses.KEY_PPAGE,):  # Page Up
                     self.preview_scroll = max(0, self.preview_scroll - 10)
+                    self.last_match_line = self.preview_scroll
                 elif ch_code in (curses.KEY_NPAGE,):  # Page Down
                     self.preview_scroll += 10
+                    self.last_match_line = self.preview_scroll
                 elif ch_code in (curses.KEY_HOME,):
                     self.preview_scroll = 0
+                    self.last_match_line = self.preview_scroll
                 elif ch_code in (curses.KEY_END,):
                     self.preview_scroll = max(0, len(self.preview_wrapped_lines) - 1)
+                    self.last_match_line = self.preview_scroll
 
 
 def main():
