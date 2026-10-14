@@ -819,13 +819,18 @@ class AgSelectTUI:
 
         while True:
             self.render()
-            ch = self.stdscr.getch()
+            try:
+                ch = self.stdscr.get_wch()
+            except curses.error:
+                continue
 
             if ch == -1:
                 continue
 
+            ch_code = ord(ch) if isinstance(ch, str) else ch
+
             # Eventos do Mouse (clique para focar painel ou selecionar item)
-            if ch == curses.KEY_MOUSE:
+            if ch_code == curses.KEY_MOUSE:
                 try:
                     _, mx, my, _, bstate = curses.getmouse()
                     handled = False
@@ -903,35 +908,35 @@ class AgSelectTUI:
                 continue
 
             # Redimensionamento dinâmico da janela do terminal
-            if ch == curses.KEY_RESIZE:
+            if ch_code == curses.KEY_RESIZE:
                 self.preview_last_width = 0
                 continue
 
             # Tecla ESC ou 'q' (quando não estiver digitando na busca)
-            if ch == 27:
+            if ch_code == 27:
                 if self.active_panel == self.PANEL_SEARCH:
                     self.active_panel = self.PANEL_LOCAL
                     continue
                 return None
 
-            if ch in (ord("q"), ord("Q")) and self.active_panel != self.PANEL_SEARCH:
+            if ch in ("q", "Q") and self.active_panel != self.PANEL_SEARCH:
                 return None
 
             # Atalhos numéricos diretos para foco nos painéis
-            if ch in (ord("1"), ord("2"), ord("3"), ord("4")) and self.active_panel != self.PANEL_SEARCH:
-                self.active_panel = ch - ord("0")
+            if ch in ("1", "2", "3", "4") and self.active_panel != self.PANEL_SEARCH:
+                self.active_panel = int(ch)
                 self.update_preview()
                 continue
 
             # Alternar painel com TAB
-            if ch == 9:  # TAB
+            if ch_code == 9:  # TAB
                 order = [self.PANEL_SEARCH, self.PANEL_LOCAL, self.PANEL_GLOBAL, self.PANEL_PREVIEW]
                 cur_idx = order.index(self.active_panel)
                 self.active_panel = order[(cur_idx + 1) % len(order)]
                 self.update_preview()
                 continue
 
-            if ch == curses.KEY_BTAB:  # Shift + TAB
+            if ch_code == curses.KEY_BTAB:  # Shift + TAB
                 order = [self.PANEL_SEARCH, self.PANEL_LOCAL, self.PANEL_GLOBAL, self.PANEL_PREVIEW]
                 cur_idx = order.index(self.active_panel)
                 self.active_panel = order[(cur_idx - 1) % len(order)]
@@ -939,7 +944,7 @@ class AgSelectTUI:
                 continue
 
             # Tecla ENTER para escolher a conversa
-            if ch in (ord("\n"), curses.KEY_ENTER):
+            if ch_code in (ord("\n"), ord("\r"), curses.KEY_ENTER):
                 if self.active_panel == self.PANEL_SEARCH:
                     self.active_panel = self.PANEL_LOCAL if self.filtered_local else self.PANEL_GLOBAL
                     self.update_preview()
@@ -950,67 +955,91 @@ class AgSelectTUI:
                 continue
 
             # Deletar conversa
-            if (ch in (ord("d"), ord("D"), 4)) and self.active_panel in (self.PANEL_LOCAL, self.PANEL_GLOBAL):
+            if (ch in ("d", "D") or ch_code == 4) and self.active_panel in (self.PANEL_LOCAL, self.PANEL_GLOBAL):
                 self.delete_selected()
                 continue
 
             # Ações específicas por painel
             if self.active_panel == self.PANEL_SEARCH:
-                if ch in (curses.KEY_BACKSPACE, 127, 8):
+                if ch_code in (curses.KEY_BACKSPACE, 127, 8) or ch in ("\x7f", "\x08", "\b"):
                     if self.search_query:
                         self.search_query = self.search_query[:-1]
                         self.apply_filter()
-                elif ch in (curses.KEY_DOWN,):
+                elif ch_code == 21:  # Ctrl + U: limpa a busca
+                    if self.search_query:
+                        self.search_query = ""
+                        self.apply_filter()
+                elif ch_code in (curses.KEY_DOWN,):
                     self.active_panel = self.PANEL_LOCAL if self.filtered_local else self.PANEL_GLOBAL
-                elif 32 <= ch <= 126:
-                    self.search_query += chr(ch)
+                elif (isinstance(ch, str) and ch.isprintable()) or (isinstance(ch, int) and 32 <= ch <= 126):
+                    self.search_query += ch if isinstance(ch, str) else chr(ch)
                     self.apply_filter()
 
             elif self.active_panel == self.PANEL_LOCAL:
-                if ch in (curses.KEY_UP, ord("k")):
+                if ch_code in (curses.KEY_UP,) or ch in ("k", "K"):
                     if self.selected_local_idx > 0:
                         self.selected_local_idx -= 1
                         self.h_offset_local = 0
                         self.update_preview()
-                elif ch in (curses.KEY_DOWN, ord("j")):
+                elif ch_code in (curses.KEY_DOWN,) or ch in ("j", "J"):
                     if self.selected_local_idx < len(self.filtered_local) - 1:
                         self.selected_local_idx += 1
                         self.h_offset_local = 0
                         self.update_preview()
-                elif ch in (curses.KEY_RIGHT, ord("l")):
+                elif ch_code in (curses.KEY_HOME,):
+                    self.selected_local_idx = 0
+                    self.h_offset_local = 0
+                    self.update_preview()
+                elif ch_code in (curses.KEY_END,):
+                    self.selected_local_idx = max(0, len(self.filtered_local) - 1)
+                    self.h_offset_local = 0
+                    self.update_preview()
+                elif ch_code in (curses.KEY_RIGHT,) or ch in ("l", "L"):
                     self.h_offset_local += 5
-                elif ch in (curses.KEY_LEFT, ord("h")):
+                elif ch_code in (curses.KEY_LEFT,) or ch in ("h", "H"):
                     self.h_offset_local = max(0, self.h_offset_local - 5)
-                elif ch == ord("/"):
+                elif ch == "/":
                     self.active_panel = self.PANEL_SEARCH
 
             elif self.active_panel == self.PANEL_GLOBAL:
-                if ch in (curses.KEY_UP, ord("k")):
+                if ch_code in (curses.KEY_UP,) or ch in ("k", "K"):
                     if self.selected_global_idx > 0:
                         self.selected_global_idx -= 1
                         self.h_offset_global = 0
                         self.update_preview()
-                elif ch in (curses.KEY_DOWN, ord("j")):
+                elif ch_code in (curses.KEY_DOWN,) or ch in ("j", "J"):
                     if self.selected_global_idx < len(self.filtered_global) - 1:
                         self.selected_global_idx += 1
                         self.h_offset_global = 0
                         self.update_preview()
-                elif ch in (curses.KEY_RIGHT, ord("l")):
+                elif ch_code in (curses.KEY_HOME,):
+                    self.selected_global_idx = 0
+                    self.h_offset_global = 0
+                    self.update_preview()
+                elif ch_code in (curses.KEY_END,):
+                    self.selected_global_idx = max(0, len(self.filtered_global) - 1)
+                    self.h_offset_global = 0
+                    self.update_preview()
+                elif ch_code in (curses.KEY_RIGHT,) or ch in ("l", "L"):
                     self.h_offset_global += 5
-                elif ch in (curses.KEY_LEFT, ord("h")):
+                elif ch_code in (curses.KEY_LEFT,) or ch in ("h", "H"):
                     self.h_offset_global = max(0, self.h_offset_global - 5)
-                elif ch == ord("/"):
+                elif ch == "/":
                     self.active_panel = self.PANEL_SEARCH
 
             elif self.active_panel == self.PANEL_PREVIEW:
-                if ch in (curses.KEY_UP, ord("k")):
+                if ch_code in (curses.KEY_UP,) or ch in ("k", "K"):
                     self.preview_scroll = max(0, self.preview_scroll - 1)
-                elif ch in (curses.KEY_DOWN, ord("j")):
+                elif ch_code in (curses.KEY_DOWN,) or ch in ("j", "J"):
                     self.preview_scroll += 1
-                elif ch in (curses.KEY_PPAGE,):  # Page Up
+                elif ch_code in (curses.KEY_PPAGE,):  # Page Up
                     self.preview_scroll = max(0, self.preview_scroll - 10)
-                elif ch in (curses.KEY_NPAGE,):  # Page Down
+                elif ch_code in (curses.KEY_NPAGE,):  # Page Down
                     self.preview_scroll += 10
+                elif ch_code in (curses.KEY_HOME,):
+                    self.preview_scroll = 0
+                elif ch_code in (curses.KEY_END,):
+                    self.preview_scroll = max(0, len(self.preview_wrapped_lines) - 1)
 
 
 def main():
@@ -1023,7 +1052,15 @@ def main():
     chosen_cid = curses.wrapper(run_curses)
 
     if chosen_cid:
-        os.execvp("agy", ["agy", "--conversation", chosen_cid])
+        try:
+            os.execvp("agy", ["agy", "--conversation", chosen_cid])
+        except FileNotFoundError:
+            print("Erro: O executável 'agy' não foi encontrado no PATH.", file=sys.stderr)
+            print("Certifique-se de que o Google Antigravity CLI está instalado e acessível no ambiente.", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Erro ao executar 'agy': {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
