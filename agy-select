@@ -26,7 +26,8 @@ TAG_REGEX = re.compile(
     r"guidelines|communication_style|web_application_development|identity)>[\s\S]*?</\1>",
     re.IGNORECASE,
 )
-XML_REGEX = re.compile(r"<[^>]+>")
+USER_REQUEST_REGEX = re.compile(r"<USER_REQUEST>([\s\S]*?)</USER_REQUEST>", re.IGNORECASE)
+WRAPPER_TAGS_REGEX = re.compile(r"</?(?:USER_REQUEST|user_request)>")
 
 
 def is_workspace_local(current_dir: str, uris_raw: str) -> bool:
@@ -71,20 +72,39 @@ def is_workspace_local(current_dir: str, uris_raw: str) -> bool:
     return False
 
 
-def clean_text(text: str) -> str:
+def clean_user_content(text: str) -> str:
+    """Extrai a solicitação do usuário e remove metadados sem destruir código, generics ou tags legítimas."""
     if not text:
         return ""
-    text = TAG_REGEX.sub("", str(text))
-    text = XML_REGEX.sub("", text)
-    return " ".join(text.split()).strip()
+    text_str = str(text)
+    match = USER_REQUEST_REGEX.search(text_str)
+    if match:
+        return match.group(1).strip()
+    cleaned = TAG_REGEX.sub("", text_str)
+    cleaned = WRAPPER_TAGS_REGEX.sub("", cleaned)
+    return cleaned.strip()
+
+
+def clean_text(text: str) -> str:
+    """Limpa texto para exibição de título em uma única linha."""
+    cleaned = clean_user_content(text)
+    return " ".join(cleaned.split()).strip()
+
+
+def clean_preview_user(text: str) -> str:
+    """Limpa o prompt do usuário para o preview mantendo formatação e código intactos."""
+    return clean_user_content(text)
+
+
+def clean_preview_ai(text: str) -> str:
+    """Limpa a resposta da IA para o preview preservando código, Markdown, HTML e generics."""
+    if not text:
+        return ""
+    return str(text).strip()
 
 
 def clean_preview(text: str) -> str:
-    if not text:
-        return ""
-    text = TAG_REGEX.sub("", str(text))
-    text = XML_REGEX.sub("", text)
-    return text.strip()
+    return clean_preview_user(text)
 
 
 def get_search_blob(conv: dict) -> str:
@@ -213,9 +233,9 @@ def load_conversation_messages(transcript_path: str):
                     if content:
                         total_chars += len(str(content))
                     if m_type == "USER_INPUT" and content:
-                        messages.append(("user", clean_preview(content)))
+                        messages.append(("user", clean_preview_user(content)))
                     elif m_type == "PLANNER_RESPONSE" and src == "MODEL" and content:
-                        messages.append(("ai", clean_preview(content)))
+                        messages.append(("ai", clean_preview_ai(content)))
                 except Exception:
                     pass
     except Exception:
