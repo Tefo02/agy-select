@@ -16,6 +16,7 @@
 *   **🎯 Navegação de Ocorrências (`n` / `N`):** Pule diretamente para o próximo (`n`) ou anterior (`N`) match no preview sem travar a rolagem manual livre.
 *   **👁️ Preview com Rolagem Completa:** Visualização em balões estilizados com quebra de linha dinâmica (*word-wrap*), rolagem e estimativa de uso da janela de contexto.
 *   **🛡️ Limpeza Inteligente sem Perda de Código:** Remove metadados internos do Antigravity (`<USER_REQUEST>`, `<skills>`, `<identity>`) mantendo código-fonte, templates C++, generics e tags intactos.
+*   **🏷️ Renomeação Persistente:** Renomeie conversas selecionadas pressionando `r`, com diálogo interativo e persistência imediata no SQLite do Antigravity.
 *   **🗑️ Exclusão Segura:** Apague conversas indesejadas diretamente pela interface (`d`), com diálogo de confirmação seguro que remove logs e bancos de dados da sessão.
 *   **🖱️ Suporte Completo a Mouse:** Clique para focar e selecionar itens em qualquer painel, além de suporte a rolagem direcionada pelo ponteiro do mouse.
 
@@ -74,6 +75,7 @@ agy-select
 | **`PageUp` / `PageDown`** | Rola rapidamente o painel de preview |
 | **`/`** | Pula imediatamente para a caixa de busca |
 | **`Ctrl+U`** | Limpa o campo de busca |
+| **`r`** | Renomeia o título da conversa selecionada (com diálogo e persistência no SQLite) |
 | **`d`** | Exclui permanentemente a conversa selecionada (com confirmação) |
 | **`q`** / **`ESC`** | Sai do aplicativo (ou desativa foco da busca) |
 
@@ -94,6 +96,7 @@ agy-select
 *   **🎯 Match Navigation (`n` / `N`):** Jump between next (`n`) and previous (`N`) search matches in the preview without locking free manual scrolling.
 *   **👁️ Full Transcript Preview:** Styled message bubbles with dynamic word wrapping, scroll tracking, and context window estimation.
 *   **🛡️ Smart Code Preservation:** Strips internal Antigravity tags without mutilating code snippets, generics, or HTML.
+*   **🏷️ Persistent Session Renaming:** Rename conversations with `r`, featuring an interactive dialog and persistent storage in SQLite.
 *   **🗑️ Safe Session Deletion:** Delete unwanted conversations with `d`, wiping both transcript logs and session SQLite database safely.
 *   **🖱️ Full Mouse Support:** Click to focus panels and select conversations, plus targeted mouse wheel scrolling.
 
@@ -117,3 +120,21 @@ agy-select
     ```bash
     agy-select
     ```
+
+### Keyboard Shortcuts
+
+| Key / Shortcut | Action |
+| :--- | :--- |
+| **`ENTER`** | Resume selected conversation in `agy` (or switch focus from search box) |
+| **`TAB`** / **`Shift+TAB`** | Cycle panel focus sequentially (1 → 2 → 3 → 4) |
+| **`1`**, **`2`**, **`3`**, **`4`** | Jump directly to corresponding panel |
+| **`n`** / **`N`** | Jump to next / previous match in preview |
+| **`↑` / `↓`** or **`k` / `j`** | Navigate list items or scroll preview freely |
+| **`←` / `→`** or **`h` / `l`** | Horizontally scroll long titles |
+| **`Home` / `End`** | Jump to first / last item or top / bottom of preview |
+| **`PageUp` / `PageDown`** | Fast scroll preview panel |
+| **`/`** | Focus search box immediately |
+| **`Ctrl+U`** | Clear search query |
+| **`r`** | Rename selected conversation (with dialog and SQLite persistence) |
+| **`d`** | Delete selected conversation permanently (with confirmation) |
+| **`q`** / **`ESC`** | Quit application (or unfocus search) |
