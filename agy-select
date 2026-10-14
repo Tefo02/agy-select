@@ -14,8 +14,10 @@ import sqlite3
 import sys
 import textwrap
 
-BRAIN_DIR = os.path.expanduser("~/.gemini/antigravity-cli/brain")
-DB_PATH = os.path.expanduser("~/.gemini/antigravity-cli/conversation_summaries.db")
+APP_DATA_DIR = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or os.path.expanduser("~/.gemini/antigravity-cli")
+BRAIN_DIR = os.path.join(APP_DATA_DIR, "brain")
+DB_PATH = os.path.join(APP_DATA_DIR, "conversation_summaries.db")
+CONVERSATIONS_DIR = os.path.join(APP_DATA_DIR, "conversations")
 
 TAG_REGEX = re.compile(
     r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE|USER_INFORMATION|"
@@ -75,7 +77,7 @@ def load_conversations(current_dir: str):
     db_meta = {}
     if os.path.exists(DB_PATH):
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(DB_PATH, timeout=5.0)
             cur = conn.cursor()
             for row in cur.execute(
                 "SELECT conversation_id, title, workspace_uris, last_modified_time FROM conversation_summaries"
@@ -688,17 +690,32 @@ class AgSelectTUI:
         )
         if confirmed:
             try:
-                if os.path.exists(conv["cpath"]):
-                    shutil.rmtree(conv["cpath"])
+                cid = conv["cid"]
+                cpath = os.path.realpath(conv.get("cpath", ""))
+                real_brain = os.path.realpath(BRAIN_DIR)
+
+                # Valida que cpath é um diretório diretamente filho de BRAIN_DIR e corresponde ao cid
+                if os.path.dirname(cpath) == real_brain and os.path.basename(cpath) == cid:
+                    if os.path.exists(cpath):
+                        shutil.rmtree(cpath)
+
+                # Remove banco de dados individual da sessão se existir em conversations/<cid>.db
+                conv_db_path = os.path.join(CONVERSATIONS_DIR, f"{cid}.db")
+                if os.path.exists(conv_db_path):
+                    try:
+                        os.remove(conv_db_path)
+                    except OSError:
+                        pass
+
                 if os.path.exists(DB_PATH):
-                    conn = sqlite3.connect(DB_PATH)
+                    conn = sqlite3.connect(DB_PATH, timeout=5.0)
                     cur = conn.cursor()
-                    cur.execute("DELETE FROM conversation_summaries WHERE conversation_id = ?", (conv["cid"],))
+                    cur.execute("DELETE FROM conversation_summaries WHERE conversation_id = ?", (cid,))
                     conn.commit()
                     conn.close()
 
-                self.status_message = f"Conversa {conv['cid'][:8]} apagada com sucesso!"
-                self.all_conversations = [c for c in self.all_conversations if c["cid"] != conv["cid"]]
+                self.status_message = f"Conversa {cid[:8]} apagada com sucesso!"
+                self.all_conversations = [c for c in self.all_conversations if c["cid"] != cid]
                 self.apply_filter()
             except Exception as e:
                 self.status_message = f"Erro ao apagar: {str(e)}"
