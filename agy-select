@@ -107,6 +107,23 @@ def clean_preview(text: str) -> str:
     return clean_preview_user(text)
 
 
+def compile_search_query(query: str):
+    """Compila query como regex (case-insensitive) com fallback seguro para busca literal."""
+    query = query.strip()
+    if not query:
+        return None, None
+    try:
+        compiled = re.compile(query, re.IGNORECASE)
+        return compiled, None
+    except re.error as e:
+        # Se for regex incompleto enquanto digita, faz fallback seguro para busca literal
+        try:
+            compiled = re.compile(re.escape(query), re.IGNORECASE)
+            return compiled, str(e)
+        except Exception:
+            return None, str(e)
+
+
 def get_search_blob(conv: dict) -> str:
     """Carrega o texto completo de busca sob demanda apenas quando uma pesquisa for digitada."""
     if conv.get("search_blob") is None:
@@ -132,7 +149,7 @@ def get_search_blob(conv: dict) -> str:
                             pass
             except Exception:
                 pass
-        conv["search_blob"] = " ".join(full_search_text).lower()
+        conv["search_blob"] = " ".join(full_search_text)
     return conv["search_blob"]
 
 
@@ -255,6 +272,8 @@ class AgSelectTUI:
         self.active_panel = self.PANEL_LOCAL
         self.last_list_panel = self.PANEL_LOCAL
         self.search_query = ""
+        self.compiled_query = None
+        self.regex_error = None
 
         self.all_conversations = load_conversations(self.current_dir)
         self.filtered_local = []
@@ -314,15 +333,23 @@ class AgSelectTUI:
         curses.init_pair(10, curses.COLOR_GREEN, -1)
 
     def apply_filter(self):
-        query = self.search_query.strip().lower()
-        if not query:
+        query = self.search_query.strip()
+        compiled, err = compile_search_query(query)
+        self.compiled_query = compiled
+        self.regex_error = err
+
+        if not compiled:
             self.filtered_local = [c for c in self.all_conversations if c["is_local"]]
             self.filtered_global = [c for c in self.all_conversations if not c["is_local"]]
         else:
             local_matches = []
             global_matches = []
             for c in self.all_conversations:
-                if query in c["title"].lower() or query in c["cid"].lower() or query in get_search_blob(c):
+                if (
+                    compiled.search(c["title"])
+                    or compiled.search(c["cid"])
+                    or compiled.search(get_search_blob(c))
+                ):
                     if c["is_local"]:
                         local_matches.append(c)
                     else:
@@ -520,6 +547,8 @@ class AgSelectTUI:
             is_active=(self.active_panel == self.PANEL_SEARCH),
         )
         search_prompt = "> " + self.search_query
+        if self.regex_error:
+            search_prompt += " (~literal)"
         try:
             self.stdscr.addstr(
                 1,
