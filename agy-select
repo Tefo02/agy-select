@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import sys
 import textwrap
+from urllib.parse import unquote, urlparse
 
 APP_DATA_DIR = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or os.path.expanduser("~/.gemini/antigravity-cli")
 BRAIN_DIR = os.path.join(APP_DATA_DIR, "brain")
@@ -26,6 +27,48 @@ TAG_REGEX = re.compile(
     re.IGNORECASE,
 )
 XML_REGEX = re.compile(r"<[^>]+>")
+
+
+def is_workspace_local(current_dir: str, uris_raw: str) -> bool:
+    """Verifica se a conversa pertence ao diretório atual ou a subpastas dele de forma precisa."""
+    if not uris_raw or not current_dir:
+        return False
+
+    uris_list = []
+    uris_raw = uris_raw.strip()
+    if uris_raw.startswith("["):
+        try:
+            parsed = json.loads(uris_raw)
+            if isinstance(parsed, list):
+                uris_list = [str(u) for u in parsed]
+        except Exception:
+            uris_list = [uris_raw]
+    else:
+        uris_list = [uris_raw]
+
+    current_canon = os.path.realpath(current_dir)
+    user_home = os.path.realpath(os.path.expanduser("~"))
+
+    for u in uris_list:
+        if u.startswith("file://"):
+            parsed_path = unquote(urlparse(u).path)
+        else:
+            parsed_path = u
+        if not parsed_path:
+            continue
+        ws_canon = os.path.realpath(parsed_path)
+
+        try:
+            # Caso 1: CWD está dentro do workspace (ou são exatamente iguais)
+            if os.path.commonpath([current_canon, ws_canon]) == ws_canon:
+                return True
+            # Caso 2: CWD é a pasta pai do workspace (ex: monorepo), ignorando se CWD for a raiz HOME
+            if current_canon != user_home and os.path.commonpath([current_canon, ws_canon]) == current_canon:
+                return True
+        except ValueError:
+            pass
+
+    return False
 
 
 def clean_text(text: str) -> str:
@@ -83,7 +126,7 @@ def load_conversations(current_dir: str):
                 "SELECT conversation_id, title, workspace_uris, last_modified_time FROM conversation_summaries"
             ):
                 cid, title, uris, mtime = row
-                is_local = (current_dir in uris) if uris else False
+                is_local = is_workspace_local(current_dir, uris)
                 db_meta[cid] = {"title": title or "", "is_local": is_local, "mtime": mtime}
             conn.close()
         except Exception:
