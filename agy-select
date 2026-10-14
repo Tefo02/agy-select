@@ -313,18 +313,16 @@ class AgSelectTUI:
             self.filtered_local = [c for c in self.all_conversations if c["is_local"]]
             self.filtered_global = [c for c in self.all_conversations if not c["is_local"]]
         else:
-            self.filtered_local = [
-                c
-                for c in self.all_conversations
-                if c["is_local"]
-                and (query in c["title"].lower() or query in c["cid"].lower() or query in get_search_blob(c))
-            ]
-            self.filtered_global = [
-                c
-                for c in self.all_conversations
-                if not c["is_local"]
-                and (query in c["title"].lower() or query in c["cid"].lower() or query in get_search_blob(c))
-            ]
+            local_matches = []
+            global_matches = []
+            for c in self.all_conversations:
+                if query in c["title"].lower() or query in c["cid"].lower() or query in get_search_blob(c):
+                    if c["is_local"]:
+                        local_matches.append(c)
+                    else:
+                        global_matches.append(c)
+            self.filtered_local = local_matches
+            self.filtered_global = global_matches
 
         # Ajusta índices se saírem do limite
         if self.filtered_local:
