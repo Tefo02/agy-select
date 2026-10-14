@@ -11,7 +11,9 @@
 *   **🖥️ Interface Estilo Lazygit:** Layout com 4 painéis organizados (`[1] Search`, `[2] Local Chats`, `[3] Global Chats` e `[4] Preview`) com navegação fluida.
 *   **📂 Separação Local vs. Global:** Detecta automaticamente conversas iniciadas no diretório do projeto atual vs. conversas de outros workspaces.
 *   **⚡ Desempenho Ultra-rápido:** Leitura instantânea via metadados do SQLite do Antigravity e carregamento sob demanda (*lazy-loading*) do histórico completo.
-*   **🔍 Busca Dinâmica com UTF-8:** Filtre por ID da conversa, título ou por qualquer termo do histórico com suporte completo a caracteres acentuados.
+*   **🔍 Busca com Regex e Padrões (UTF-8):** Suporte completo a expressões regulares (ex.: `erro|falha`, `def\s+\w+`) e caracteres acentuados, com fallback seguro para busca literal enquanto digita.
+*   **✨ Destaque Visual (Highlight) no Preview:** Ocorrências encontradas pelo padrão de busca são destacadas automaticamente em amarelo no painel de preview.
+*   **🎯 Navegação de Ocorrências (`n` / `N`):** Pule diretamente para o próximo (`n`) ou anterior (`N`) match no preview sem travar a rolagem manual livre.
 *   **👁️ Preview com Rolagem Completa:** Visualização em balões estilizados com quebra de linha dinâmica (*word-wrap*), rolagem e estimativa de uso da janela de contexto.
 *   **🛡️ Limpeza Inteligente sem Perda de Código:** Remove metadados internos do Antigravity (`<USER_REQUEST>`, `<skills>`, `<identity>`) mantendo código-fonte, templates C++, generics e tags intactos.
 *   **🗑️ Exclusão Segura:** Apague conversas indesejadas diretamente pela interface (`d`), com diálogo de confirmação seguro que remove logs e bancos de dados da sessão.
@@ -65,7 +67,8 @@ agy-select
 | **`ENTER`** | Retoma a conversa selecionada no `agy` (ou muda o foco se estiver na busca) |
 | **`TAB`** / **`Shift+TAB`** | Alterna o foco sequencialmente entre os painéis (1 → 2 → 3 → 4) |
 | **`1`**, **`2`**, **`3`**, **`4`** | Foca diretamente o painel correspondente |
-| **`↑` / `↓`** ou **`k` / `j`** | Navega pelos itens da lista ou rola o preview |
+| **`n`** / **`N`** | Pula para a próxima / anterior ocorrência encontrada no preview |
+| **`↑` / `↓`** ou **`k` / `j`** | Navega pelos itens da lista ou rola o preview livremente |
 | **`←` / `→`** ou **`h` / `l`** | Rola horizontalmente títulos longos na lista |
 | **`Home` / `End`** | Pula para o primeiro / último item ou topo / fim do preview |
 | **`PageUp` / `PageDown`** | Rola rapidamente o painel de preview |
@@ -86,7 +89,9 @@ agy-select
 *   **🖥️ Lazygit-Style Interface:** 4 dedicated panels (`[1] Search`, `[2] Local Chats`, `[3] Global Chats`, and `[4] Preview`) with smooth keyboard and mouse navigation.
 *   **📂 Local vs. Global Detection:** Automatically separates chats associated with the current workspace from global conversations.
 *   **⚡ High Performance:** Instant startup using Antigravity's SQLite metadata and on-demand lazy loading of full transcripts.
-*   **🔍 Full-text Search with UTF-8:** Search by conversation ID, topic title, or dialogue content with full accent and Unicode support.
+*   **🔍 Full-text Search with Regex & UTF-8:** Search by conversation ID, topic title, or dialogue content using regular expressions (e.g. `error|fail`, `def\s+\w+`) with safe literal fallback.
+*   **✨ Visual Highlight in Preview:** Pattern matches are highlighted in real-time in yellow inside the preview bubbles.
+*   **🎯 Match Navigation (`n` / `N`):** Jump between next (`n`) and previous (`N`) search matches in the preview without locking free manual scrolling.
 *   **👁️ Full Transcript Preview:** Styled message bubbles with dynamic word wrapping, scroll tracking, and context window estimation.
 *   **🛡️ Smart Code Preservation:** Strips internal Antigravity tags without mutilating code snippets, generics, or HTML.
 *   **🗑️ Safe Session Deletion:** Delete unwanted conversations with `d`, wiping both transcript logs and session SQLite database safely.
