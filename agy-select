@@ -253,6 +253,7 @@ class AgSelectTUI:
         self.stdscr = stdscr
         self.current_dir = current_dir
         self.active_panel = self.PANEL_LOCAL
+        self.last_list_panel = self.PANEL_LOCAL
         self.search_query = ""
 
         self.all_conversations = load_conversations(self.current_dir)
@@ -281,7 +282,12 @@ class AgSelectTUI:
 
         # Se não houver conversas locais, inicia no painel global
         if not self.filtered_local and self.filtered_global:
-            self.active_panel = self.PANEL_GLOBAL
+            self.set_active_panel(self.PANEL_GLOBAL)
+
+    def set_active_panel(self, panel_id: int):
+        self.active_panel = panel_id
+        if panel_id in (self.PANEL_LOCAL, self.PANEL_GLOBAL):
+            self.last_list_panel = panel_id
 
     def init_colors(self):
         curses.use_default_colors()
@@ -341,10 +347,16 @@ class AgSelectTUI:
         self.update_preview(force_reload=True)
 
     def get_selected_conversation(self):
-        if self.active_panel == self.PANEL_LOCAL:
+        target_panel = self.active_panel
+        if target_panel in (self.PANEL_PREVIEW, self.PANEL_SEARCH):
+            target_panel = self.last_list_panel
+
+        if target_panel == self.PANEL_LOCAL:
             if self.filtered_local and 0 <= self.selected_local_idx < len(self.filtered_local):
                 return self.filtered_local[self.selected_local_idx]
-        elif self.active_panel in (self.PANEL_GLOBAL, self.PANEL_SEARCH, self.PANEL_PREVIEW):
+            elif self.filtered_global and 0 <= self.selected_global_idx < len(self.filtered_global):
+                return self.filtered_global[self.selected_global_idx]
+        elif target_panel == self.PANEL_GLOBAL:
             if self.filtered_global and 0 <= self.selected_global_idx < len(self.filtered_global):
                 return self.filtered_global[self.selected_global_idx]
             elif self.filtered_local and 0 <= self.selected_local_idx < len(self.filtered_local):
@@ -836,7 +848,7 @@ class AgSelectTUI:
                     if bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_DOUBLE_CLICKED):
                         for panel_id, (py, px, ph, pw) in self.panel_bounds.items():
                             if py <= my < py + ph and px <= mx < px + pw:
-                                self.active_panel = panel_id
+                                self.set_active_panel(panel_id)
                                 if panel_id == self.PANEL_LOCAL:
                                     clicked_row = my - (py + 1)
                                     list_h = max(1, ph - 2)
@@ -913,7 +925,7 @@ class AgSelectTUI:
             # Tecla ESC ou 'q' (quando não estiver digitando na busca)
             if ch_code == 27:
                 if self.active_panel == self.PANEL_SEARCH:
-                    self.active_panel = self.PANEL_LOCAL
+                    self.set_active_panel(self.PANEL_LOCAL)
                     continue
                 return None
 
@@ -922,7 +934,7 @@ class AgSelectTUI:
 
             # Atalhos numéricos diretos para foco nos painéis
             if ch in ("1", "2", "3", "4") and self.active_panel != self.PANEL_SEARCH:
-                self.active_panel = int(ch)
+                self.set_active_panel(int(ch))
                 self.update_preview()
                 continue
 
@@ -930,21 +942,21 @@ class AgSelectTUI:
             if ch_code == 9:  # TAB
                 order = [self.PANEL_SEARCH, self.PANEL_LOCAL, self.PANEL_GLOBAL, self.PANEL_PREVIEW]
                 cur_idx = order.index(self.active_panel)
-                self.active_panel = order[(cur_idx + 1) % len(order)]
+                self.set_active_panel(order[(cur_idx + 1) % len(order)])
                 self.update_preview()
                 continue
 
             if ch_code == curses.KEY_BTAB:  # Shift + TAB
                 order = [self.PANEL_SEARCH, self.PANEL_LOCAL, self.PANEL_GLOBAL, self.PANEL_PREVIEW]
                 cur_idx = order.index(self.active_panel)
-                self.active_panel = order[(cur_idx - 1) % len(order)]
+                self.set_active_panel(order[(cur_idx - 1) % len(order)])
                 self.update_preview()
                 continue
 
             # Tecla ENTER para escolher a conversa
             if ch_code in (ord("\n"), ord("\r"), curses.KEY_ENTER):
                 if self.active_panel == self.PANEL_SEARCH:
-                    self.active_panel = self.PANEL_LOCAL if self.filtered_local else self.PANEL_GLOBAL
+                    self.set_active_panel(self.PANEL_LOCAL if self.filtered_local else self.PANEL_GLOBAL)
                     self.update_preview()
                     continue
                 conv = self.get_selected_conversation()
@@ -953,7 +965,7 @@ class AgSelectTUI:
                 continue
 
             # Deletar conversa
-            if (ch in ("d", "D") or ch_code == 4) and self.active_panel in (self.PANEL_LOCAL, self.PANEL_GLOBAL):
+            if (ch in ("d", "D") or ch_code == 4) and self.active_panel in (self.PANEL_LOCAL, self.PANEL_GLOBAL, self.PANEL_PREVIEW):
                 self.delete_selected()
                 continue
 
@@ -968,7 +980,7 @@ class AgSelectTUI:
                         self.search_query = ""
                         self.apply_filter()
                 elif ch_code in (curses.KEY_DOWN,):
-                    self.active_panel = self.PANEL_LOCAL if self.filtered_local else self.PANEL_GLOBAL
+                    self.set_active_panel(self.PANEL_LOCAL if self.filtered_local else self.PANEL_GLOBAL)
                 elif (isinstance(ch, str) and ch.isprintable()) or (isinstance(ch, int) and 32 <= ch <= 126):
                     self.search_query += ch if isinstance(ch, str) else chr(ch)
                     self.apply_filter()
@@ -997,7 +1009,7 @@ class AgSelectTUI:
                 elif ch_code in (curses.KEY_LEFT,) or ch in ("h", "H"):
                     self.h_offset_local = max(0, self.h_offset_local - 5)
                 elif ch == "/":
-                    self.active_panel = self.PANEL_SEARCH
+                    self.set_active_panel(self.PANEL_SEARCH)
 
             elif self.active_panel == self.PANEL_GLOBAL:
                 if ch_code in (curses.KEY_UP,) or ch in ("k", "K"):
@@ -1023,7 +1035,7 @@ class AgSelectTUI:
                 elif ch_code in (curses.KEY_LEFT,) or ch in ("h", "H"):
                     self.h_offset_global = max(0, self.h_offset_global - 5)
                 elif ch == "/":
-                    self.active_panel = self.PANEL_SEARCH
+                    self.set_active_panel(self.PANEL_SEARCH)
 
             elif self.active_panel == self.PANEL_PREVIEW:
                 if ch_code in (curses.KEY_UP,) or ch in ("k", "K"):
