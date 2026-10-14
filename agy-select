@@ -815,13 +815,19 @@ class AgSelectTUI:
                                 self.active_panel = panel_id
                                 if panel_id == self.PANEL_LOCAL:
                                     clicked_row = my - (py + 1)
-                                    if 0 <= clicked_row < len(self.filtered_local):
-                                        self.selected_local_idx = clicked_row
+                                    list_h = max(1, ph - 2)
+                                    scroll = (self.selected_local_idx - list_h + 1) if self.selected_local_idx >= list_h else 0
+                                    target_idx = scroll + clicked_row
+                                    if 0 <= clicked_row < list_h and 0 <= target_idx < len(self.filtered_local):
+                                        self.selected_local_idx = target_idx
                                         self.h_offset_local = 0
                                 elif panel_id == self.PANEL_GLOBAL:
                                     clicked_row = my - (py + 1)
-                                    if 0 <= clicked_row < len(self.filtered_global):
-                                        self.selected_global_idx = clicked_row
+                                    list_h = max(1, ph - 2)
+                                    scroll = (self.selected_global_idx - list_h + 1) if self.selected_global_idx >= list_h else 0
+                                    target_idx = scroll + clicked_row
+                                    if 0 <= clicked_row < list_h and 0 <= target_idx < len(self.filtered_global):
+                                        self.selected_global_idx = target_idx
                                         self.h_offset_global = 0
                                 self.update_preview()
                                 handled = True
