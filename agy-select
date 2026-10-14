@@ -708,30 +708,51 @@ class AgSelectTUI:
 
     def confirm_dialog(self, title, question):
         max_y, max_x = self.stdscr.getmaxyx()
-        h, w = 7, 50
+        if max_y < 8 or max_x < 28:
+            self.status_message = "Aumente o terminal para confirmar a exclusão."
+            return False
+
+        h = 7
+        w = min(50, max(28, max_x - 4))
         y = max(0, (max_y - h) // 2)
         x = max(0, (max_x - w) // 2)
 
-        win = curses.newwin(h, w, y, x)
+        try:
+            win = curses.newwin(h, w, y, x)
+        except curses.error:
+            self.status_message = "Terminal muito pequeno para diálogo."
+            return False
+
         win.keypad(True)
         curses.curs_set(0)
 
         selected_btn = 0  # 0: Não, 1: Sim
 
         while True:
+            cur_y, cur_x = self.stdscr.getmaxyx()
+            if cur_y < 8 or cur_x < 28:
+                return False
+
             win.erase()
             win.box()
-            win.addstr(0, 2, f" {title} ", curses.color_pair(8) | curses.A_BOLD)
-            win.addstr(2, 4, question[: w - 8], curses.color_pair(2))
+            try:
+                win.addstr(0, 2, f" {title[: max(1, w - 6)]} ", curses.color_pair(8) | curses.A_BOLD)
+                win.addstr(2, 2, question[: max(1, w - 4)], curses.color_pair(2))
 
-            no_attr = curses.color_pair(3) if selected_btn == 0 else curses.color_pair(2)
-            yes_attr = curses.color_pair(3) if selected_btn == 1 else curses.color_pair(2)
+                no_attr = curses.color_pair(3) if selected_btn == 0 else curses.color_pair(2)
+                yes_attr = curses.color_pair(3) if selected_btn == 1 else curses.color_pair(2)
 
-            win.addstr(4, 12, " [ Não ] ", no_attr)
-            win.addstr(4, 28, " [ Sim ] ", yes_attr)
-            win.refresh()
+                btn1_x = max(2, (w // 2) - 12)
+                btn2_x = min(w - 11, (w // 2) + 3)
+                win.addstr(4, btn1_x, " [ Não ] ", no_attr)
+                win.addstr(4, btn2_x, " [ Sim ] ", yes_attr)
+                win.refresh()
+            except curses.error:
+                pass
 
             ch = win.getch()
+            if ch == curses.KEY_RESIZE:
+                return False
             if ch in (curses.KEY_LEFT, curses.KEY_RIGHT, 9):  # Tab
                 selected_btn = 1 - selected_btn
             elif ch in (ord("\n"), curses.KEY_ENTER):
