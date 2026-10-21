@@ -293,6 +293,7 @@ class AgSelectTUI:
         self.preview_last_width = 0
         self.preview_scroll = 0
         self.last_match_line = -1
+        self.current_match_idx = 0
 
         self.panel_bounds = {}
 
@@ -335,6 +336,8 @@ class AgSelectTUI:
         curses.init_pair(10, curses.COLOR_GREEN, -1)
         # 11: Destaque de Busca / Regex Match (Preto no Amarelo)
         curses.init_pair(11, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+        # 12: Destaque de Busca / Match Ativo Rastreado (Branco no Magenta)
+        curses.init_pair(12, curses.COLOR_WHITE, curses.COLOR_MAGENTA)
 
     def apply_filter(self):
         query = self.search_query.strip()
@@ -374,6 +377,7 @@ class AgSelectTUI:
 
         self.h_offset_local = 0
         self.h_offset_global = 0
+        self.current_match_idx = 0
 
         self.update_preview(force_reload=True)
 
@@ -411,6 +415,7 @@ class AgSelectTUI:
 
         self.preview_cache_cid = conv["cid"]
         self.preview_scroll = 0
+        self.current_match_idx = 0
         self.raw_messages, total_chars = load_conversation_messages(conv["transcript_path"])
         # Estimativa de tokens Gemini: ~3.8 caracteres por token
         # Base de janela de contexto do agy: 1.000.000 (1M)
@@ -616,15 +621,9 @@ class AgSelectTUI:
 
         preview_title = f"Preview (~{self.preview_est_pct:.1f}% Context)"
         if self.compiled_query:
-            matches = self.get_preview_match_lines()
+            matches = self.get_preview_matches()
             if matches:
-                curr_idx = 0
-                for idx, m in enumerate(matches):
-                    if m <= self.preview_scroll + 1:
-                        curr_idx = idx + 1
-                    else:
-                        break
-                curr_idx = max(1, curr_idx)
+                curr_idx = self.current_match_idx + 1 if 0 <= self.current_match_idx < len(matches) else 1
                 preview_title = f"Preview (~{self.preview_est_pct:.1f}%) [{curr_idx}/{len(matches)} matches]"
             else:
                 preview_title = f"Preview (~{self.preview_est_pct:.1f}%) [0 matches]"
@@ -725,7 +724,17 @@ class AgSelectTUI:
             except curses.error:
                 pass
 
-    def draw_text_with_highlights(self, y: int, x: int, text: str, default_attr: int, highlight_attr: int):
+    def draw_text_with_highlights(
+        self,
+        y: int,
+        x: int,
+        text: str,
+        default_attr: int,
+        highlight_attr: int,
+        line_idx: int = -1,
+        active_match: tuple = None,
+        active_highlight_attr: int = 0,
+    ):
         if not text:
             return
 
@@ -749,7 +758,14 @@ class AgSelectTUI:
                     cur_x += len(part)
 
                 match_text = text[start:end]
-                self.stdscr.addstr(y, cur_x, match_text, highlight_attr)
+                is_active = (
+                    active_match is not None
+                    and line_idx == active_match[0]
+                    and start == active_match[1]
+                    and end == active_match[2]
+                )
+                attr = (active_highlight_attr or highlight_attr) if is_active else highlight_attr
+                self.stdscr.addstr(y, cur_x, match_text, attr)
                 cur_x += len(match_text)
                 last_pos = end
 
@@ -759,59 +775,64 @@ class AgSelectTUI:
         except curses.error:
             pass
 
-    def get_preview_match_lines(self):
+    def get_preview_matches(self):
         if not self.compiled_query or not self.preview_wrapped_lines:
             return []
         matches = []
         for idx, (style, text) in enumerate(self.preview_wrapped_lines):
             if style in ("user_body", "ai_body"):
-                body_content = text[1:-1].strip()
-                if self.compiled_query.search(body_content):
-                    matches.append(idx)
+                target_text = text[1:-1]
             elif style == "normal":
-                if self.compiled_query.search(text):
-                    matches.append(idx)
+                target_text = text
+            else:
+                continue
+
+            for match in self.compiled_query.finditer(target_text):
+                start, end = match.span()
+                if start == end:
+                    continue
+                matches.append((idx, start, end))
         return matches
 
+    def _scroll_to_active_match(self, matches):
+        if not matches or not (0 <= self.current_match_idx < len(matches)):
+            return
+        target_line, _, _ = matches[self.current_match_idx]
+        preview_h = max(5, self.panel_bounds.get(self.PANEL_PREVIEW, (0, 0, 20, 0))[2] - 2)
+
+        # Se o match já estiver visível na tela atual, não pula a rolagem desnecessariamente
+        if target_line < self.preview_scroll or target_line >= (self.preview_scroll + preview_h - 1):
+            max_scroll = max(0, len(self.preview_wrapped_lines) - preview_h)
+            self.preview_scroll = max(0, min(target_line - 2, max_scroll))
+
+        idx = self.current_match_idx + 1
+        self.status_message = f"Match {idx} de {len(matches)} no preview ([n] próx, [N] ant)."
+
     def next_preview_match(self):
-        matches = self.get_preview_match_lines()
+        matches = self.get_preview_matches()
         if not matches:
             self.status_message = "Nenhum match encontrado no preview."
             return
 
-        ref = max(self.preview_scroll, getattr(self, "last_match_line", -1))
-        next_m = None
-        for m in matches:
-            if m > ref:
-                next_m = m
-                break
-        if next_m is None:
-            next_m = matches[0]
+        if self.current_match_idx < 0:
+            self.current_match_idx = 0
+        else:
+            self.current_match_idx = (self.current_match_idx + 1) % len(matches)
 
-        self.last_match_line = next_m
-        self.preview_scroll = max(0, next_m - 1)
-        idx = matches.index(next_m) + 1
-        self.status_message = f"Match {idx} de {len(matches)} no preview ([n] próx, [N] ant)."
+        self._scroll_to_active_match(matches)
 
     def prev_preview_match(self):
-        matches = self.get_preview_match_lines()
+        matches = self.get_preview_matches()
         if not matches:
             self.status_message = "Nenhum match encontrado no preview."
             return
 
-        ref = min(self.preview_scroll + 1, getattr(self, "last_match_line", 999999))
-        prev_m = None
-        for m in reversed(matches):
-            if m < ref:
-                prev_m = m
-                break
-        if prev_m is None:
-            prev_m = matches[-1]
+        if self.current_match_idx <= 0:
+            self.current_match_idx = len(matches) - 1
+        else:
+            self.current_match_idx = (self.current_match_idx - 1) % len(matches)
 
-        self.last_match_line = prev_m
-        self.preview_scroll = max(0, prev_m - 1)
-        idx = matches.index(prev_m) + 1
-        self.status_message = f"Match {idx} de {len(matches)} no preview ([n] próx, [N] ant)."
+        self._scroll_to_active_match(matches)
 
     def render_preview(self, y_start, x_start, height, width):
         if height <= 0 or width <= 0 or not self.preview_wrapped_lines:
@@ -819,6 +840,15 @@ class AgSelectTUI:
 
         max_scroll = max(0, len(self.preview_wrapped_lines) - height)
         self.preview_scroll = max(0, min(self.preview_scroll, max_scroll))
+
+        matches = self.get_preview_matches()
+        if matches:
+            if self.current_match_idx < 0 or self.current_match_idx >= len(matches):
+                self.current_match_idx = 0
+            active_match = matches[self.current_match_idx]
+        else:
+            self.current_match_idx = -1
+            active_match = None
 
         for i in range(height):
             line_idx = self.preview_scroll + i
@@ -837,24 +867,54 @@ class AgSelectTUI:
                     border_color = curses.color_pair(4) | curses.A_BOLD
                     text_color = curses.color_pair(2)
                     highlight_color = curses.color_pair(11) | curses.A_BOLD
+                    active_highlight_color = curses.color_pair(12) | curses.A_BOLD
                     self.stdscr.addstr(y_start + i, x_start, "│", border_color)
                     if width > 2:
                         body_txt = disp_text[1:-1][: width - 2]
-                        self.draw_text_with_highlights(y_start + i, x_start + 1, body_txt, text_color, highlight_color)
+                        self.draw_text_with_highlights(
+                            y_start + i,
+                            x_start + 1,
+                            body_txt,
+                            text_color,
+                            highlight_color,
+                            line_idx=line_idx,
+                            active_match=active_match,
+                            active_highlight_attr=active_highlight_color,
+                        )
                         self.stdscr.addstr(y_start + i, x_start + width - 1, "│", border_color)
                 elif style == "ai_body":
                     border_color = curses.color_pair(5) | curses.A_BOLD
                     text_color = curses.color_pair(2)
                     highlight_color = curses.color_pair(11) | curses.A_BOLD
+                    active_highlight_color = curses.color_pair(12) | curses.A_BOLD
                     self.stdscr.addstr(y_start + i, x_start, "│", border_color)
                     if width > 2:
                         body_txt = disp_text[1:-1][: width - 2]
-                        self.draw_text_with_highlights(y_start + i, x_start + 1, body_txt, text_color, highlight_color)
+                        self.draw_text_with_highlights(
+                            y_start + i,
+                            x_start + 1,
+                            body_txt,
+                            text_color,
+                            highlight_color,
+                            line_idx=line_idx,
+                            active_match=active_match,
+                            active_highlight_attr=active_highlight_color,
+                        )
                         self.stdscr.addstr(y_start + i, x_start + width - 1, "│", border_color)
                 else:
                     text_color = curses.color_pair(2)
                     highlight_color = curses.color_pair(11) | curses.A_BOLD
-                    self.draw_text_with_highlights(y_start + i, x_start, disp_text, text_color, highlight_color)
+                    active_highlight_color = curses.color_pair(12) | curses.A_BOLD
+                    self.draw_text_with_highlights(
+                        y_start + i,
+                        x_start,
+                        disp_text,
+                        text_color,
+                        highlight_color,
+                        line_idx=line_idx,
+                        active_match=active_match,
+                        active_highlight_attr=active_highlight_color,
+                    )
             except curses.error:
                 pass
 
