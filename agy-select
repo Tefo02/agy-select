@@ -130,6 +130,81 @@ def clean_text(text: str) -> str:
     return " ".join(cleaned.split()).strip()
 
 
+def extract_protobuf_title(blob: bytes) -> str:
+    """Extrai o título original em UTF-8 gravado pelo agy no campo 1 do protobuf raw_summary."""
+    if not blob or len(blob) < 3:
+        return ""
+    if blob[0] != 0x0A:
+        return ""
+    length = blob[1]
+    offset = 2
+    if length > 127:
+        length = length & 0x7F
+        shift = 7
+        while offset < len(blob):
+            b = blob[offset]
+            offset += 1
+            length |= (b & 0x7F) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+    if offset + length <= len(blob):
+        try:
+            val = blob[offset : offset + length].decode("utf-8", errors="ignore").strip()
+            if val and val != "{":
+                return val
+        except Exception:
+            pass
+    return ""
+
+
+def get_original_title(cid: str, transcript_path: str = "") -> str:
+    """Recupera o título original da IA a partir do raw_summary do SQLite ou do transcript."""
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            cur = conn.cursor()
+            row = cur.execute(
+                "SELECT raw_summary, preview FROM conversation_summaries WHERE conversation_id = ?", (cid,)
+            ).fetchone()
+            conn.close()
+            if row:
+                if row[0]:
+                    pb_title = extract_protobuf_title(row[0])
+                    if pb_title:
+                        return pb_title
+                if row[1] and row[1].strip() and row[1].strip() != "{":
+                    return row[1].strip()
+        except Exception:
+            pass
+
+    if not transcript_path:
+        transcript_path = os.path.join(BRAIN_DIR, cid, ".system_generated", "logs", "transcript.jsonl")
+
+    if os.path.exists(transcript_path):
+        try:
+            with open(transcript_path, "r", encoding="utf-8", errors="ignore") as fh:
+                for _ in range(25):
+                    line = fh.readline()
+                    if not line:
+                        break
+                    data = json.loads(line)
+                    if data.get("type") == "USER_INPUT":
+                        content = str(data.get("content", ""))
+                        if (
+                            "consolidador de Memória de Longo Prazo" in content
+                            or "extrator de memória de longo prazo" in content
+                        ):
+                            break
+                        cleaned = clean_text(content)
+                        if cleaned:
+                            return cleaned
+        except Exception:
+            pass
+
+    return "Sem mensagens"
+
+
 def clean_preview_user(text: str) -> str:
     """Limpa o prompt do usuário para o preview mantendo formatação e código intactos."""
     return clean_user_content(text)
@@ -201,16 +276,21 @@ def load_conversations(current_dir: str):
             conn = sqlite3.connect(DB_PATH, timeout=5.0)
             cur = conn.cursor()
             for row in cur.execute(
-                "SELECT conversation_id, title, preview, workspace_uris, last_modified_time FROM conversation_summaries"
+                "SELECT conversation_id, title, preview, workspace_uris, last_modified_time, raw_summary FROM conversation_summaries"
             ):
-                cid, title, preview, uris, mtime = row
+                cid, title, preview, uris, mtime, raw_summary = row
                 is_local = is_workspace_local(current_dir, uris)
                 if cid in custom_titles:
                     display_title = custom_titles[cid]
                     if (title or "").strip() != display_title:
                         db_to_sync.append((display_title, cid))
                 else:
-                    display_title = (title or "").strip() or (preview or "").strip()
+                    display_title = (title or "").strip()
+                    if not display_title:
+                        if preview and preview.strip() and preview.strip() != "{":
+                            display_title = preview.strip()
+                        elif raw_summary:
+                            display_title = extract_protobuf_title(raw_summary)
                 db_meta[cid] = {"title": display_title, "is_local": is_local, "mtime": mtime}
 
             if db_to_sync:
@@ -1152,8 +1232,38 @@ class AgSelectTUI:
 
         if not new_title:
             delete_custom_title(cid)
-            self.status_message = f"Título personalizado de {cid[:8]} removido (redefinido para original)."
-            self.all_conversations = load_conversations(self.current_dir)
+            orig_title = get_original_title(cid, conv.get("transcript_path", ""))
+
+            # Restaura no SQLite
+            if os.path.exists(DB_PATH):
+                try:
+                    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+                    cur = conn.cursor()
+                    cur.execute(
+                        "UPDATE conversation_summaries SET title = '', preview = ? WHERE conversation_id = ?",
+                        (orig_title, cid),
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+
+            # Restaura no cache JSON se existir
+            cache_meta_path = os.path.join(APP_DATA_DIR, "cache", "conversation_metadata.json")
+            if os.path.exists(cache_meta_path):
+                try:
+                    with open(cache_meta_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if cid in data and isinstance(data[cid], dict) and "summary" in data[cid]:
+                        data[cid]["summary"]["Title"] = ""
+                        data[cid]["summary"]["Preview"] = orig_title
+                        with open(cache_meta_path, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+
+            conv["title"] = orig_title
+            self.status_message = f"Conversa {cid[:8]} redefinida para o original: '{orig_title[:28]}'."
             self.apply_filter()
             return
 
