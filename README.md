@@ -12,8 +12,8 @@
 *   **📂 Separação Local vs. Global:** Detecta automaticamente conversas iniciadas no diretório do projeto atual vs. conversas de outros workspaces.
 *   **⚡ Desempenho Ultra-rápido:** Leitura instantânea via metadados do SQLite do Antigravity e carregamento sob demanda (*lazy-loading*) do histórico completo.
 *   **🔍 Busca com Regex e Padrões (UTF-8):** Suporte completo a expressões regulares (ex.: `erro|falha`, `def\s+\w+`) e caracteres acentuados, com fallback seguro para busca literal enquanto digita.
-*   **✨ Destaque Visual (Highlight) no Preview:** Ocorrências encontradas pelo padrão de busca são destacadas automaticamente em amarelo no painel de preview.
-*   **🎯 Navegação de Ocorrências (`n` / `N`):** Pule diretamente para o próximo (`n`) ou anterior (`N`) match no preview sem travar a rolagem manual livre.
+*   **✨ Destaque Visual Diferenciado no Preview:** Ocorrências encontradas pelo padrão de busca são destacadas em amarelo, e a ocorrência ativa atual fica em destaque especial magenta com negrito.
+*   **🎯 Navegação de Ocorrências (`n` / `N`):** Pule diretamente para o próximo (`n`) ou anterior (`N`) match no preview rastreando visualmente a ocorrência ativa sem travar a rolagem manual livre.
 *   **👁️ Preview com Rolagem Completa:** Visualização em balões estilizados com quebra de linha dinâmica (*word-wrap*), rolagem e estimativa de uso da janela de contexto.
 *   **🛡️ Limpeza Inteligente sem Perda de Código:** Remove metadados internos do Antigravity (`<USER_REQUEST>`, `<skills>`, `<identity>`) mantendo código-fonte, templates C++, generics e tags intactos.
 *   **🏷️ Renomeação Persistente:** Renomeie conversas selecionadas pressionando `r`, com diálogo interativo e persistência imediata no SQLite do Antigravity.
@@ -92,8 +92,8 @@ agy-select
 *   **📂 Local vs. Global Detection:** Automatically separates chats associated with the current workspace from global conversations.
 *   **⚡ High Performance:** Instant startup using Antigravity's SQLite metadata and on-demand lazy loading of full transcripts.
 *   **🔍 Full-text Search with Regex & UTF-8:** Search by conversation ID, topic title, or dialogue content using regular expressions (e.g. `error|fail`, `def\s+\w+`) with safe literal fallback.
-*   **✨ Visual Highlight in Preview:** Pattern matches are highlighted in real-time in yellow inside the preview bubbles.
-*   **🎯 Match Navigation (`n` / `N`):** Jump between next (`n`) and previous (`N`) search matches in the preview without locking free manual scrolling.
+*   **✨ Distinct Visual Highlights in Preview:** Search pattern occurrences are highlighted in yellow, while the currently active/tracked match shines in high-contrast bold magenta.
+*   **🎯 Match Navigation (`n` / `N`):** Jump sequentially between next (`n`) and previous (`N`) search matches, visually tracking the active occurrence without locking manual scrolling.
 *   **👁️ Full Transcript Preview:** Styled message bubbles with dynamic word wrapping, scroll tracking, and context window estimation.
 *   **🛡️ Smart Code Preservation:** Strips internal Antigravity tags without mutilating code snippets, generics, or HTML.
 *   **🏷️ Persistent Session Renaming:** Rename conversations with `r`, featuring an interactive dialog and persistent storage in SQLite.
