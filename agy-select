@@ -160,11 +160,12 @@ def load_conversations(current_dir: str):
             conn = sqlite3.connect(DB_PATH, timeout=5.0)
             cur = conn.cursor()
             for row in cur.execute(
-                "SELECT conversation_id, title, workspace_uris, last_modified_time FROM conversation_summaries"
+                "SELECT conversation_id, title, preview, workspace_uris, last_modified_time FROM conversation_summaries"
             ):
-                cid, title, uris, mtime = row
+                cid, title, preview, uris, mtime = row
                 is_local = is_workspace_local(current_dir, uris)
-                db_meta[cid] = {"title": title or "", "is_local": is_local, "mtime": mtime}
+                display_title = (title or "").strip() or (preview or "").strip()
+                db_meta[cid] = {"title": display_title, "is_local": is_local, "mtime": mtime}
             conn.close()
         except Exception:
             pass
@@ -1042,17 +1043,31 @@ class AgSelectTUI:
             exists = cur.fetchone()
             if exists:
                 cur.execute(
-                    "UPDATE conversation_summaries SET title = ? WHERE conversation_id = ?",
-                    (new_title, cid),
+                    "UPDATE conversation_summaries SET title = ?, preview = ? WHERE conversation_id = ?",
+                    (new_title, new_title, cid),
                 )
             else:
                 uris_json = json.dumps([f"file://{os.path.realpath(self.current_dir)}"])
                 cur.execute(
-                    "INSERT INTO conversation_summaries (conversation_id, title, workspace_uris, last_modified_time, last_user_input_time) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
-                    (cid, new_title, uris_json),
+                    "INSERT INTO conversation_summaries (conversation_id, title, preview, workspace_uris, last_modified_time, last_user_input_time) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
+                    (cid, new_title, new_title, uris_json),
                 )
             conn.commit()
             conn.close()
+
+            # Atualiza também o cache JSON se existir
+            cache_meta_path = os.path.join(APP_DATA_DIR, "cache", "conversation_metadata.json")
+            if os.path.exists(cache_meta_path):
+                try:
+                    with open(cache_meta_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if cid in data and isinstance(data[cid], dict) and "summary" in data[cid]:
+                        data[cid]["summary"]["Title"] = new_title
+                        data[cid]["summary"]["Preview"] = new_title
+                        with open(cache_meta_path, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
 
             conv["title"] = new_title
             self.status_message = f"Conversa {cid[:8]} renomeada com sucesso!"
