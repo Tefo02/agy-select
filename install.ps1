@@ -97,7 +97,14 @@ if (-not (Test-Path $TargetDir)) {
     New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
 }
 
-$filesToCopy = @("agy-select", "agy-select.cmd", "agy-select.ps1")
+# Remove agy-select.ps1 legado se existir para evitar que o PowerShell
+# dê prioridade ao .ps1 e bloqueie a execução por causa da ExecutionPolicy restrita do Windows
+$legacyPs1 = Join-Path $TargetDir "agy-select.ps1"
+if (Test-Path $legacyPs1) {
+    Remove-Item -Path $legacyPs1 -Force -ErrorAction SilentlyContinue
+}
+
+$filesToCopy = @("agy-select", "agy-select.cmd")
 foreach ($f in $filesToCopy) {
     $src = Join-Path $PSScriptRoot $f
     if (Test-Path $src) {

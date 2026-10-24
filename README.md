@@ -68,13 +68,13 @@
     ```powershell
     powershell -ExecutionPolicy Bypass -File .\install.ps1
     ```
-    > O script instala `windows-curses` se necessário e copia `agy-select`, `agy-select.cmd` e `agy-select.ps1` diretamente para `%LOCALAPPDATA%\agy\bin` (que já está configurado no seu `PATH`).
+    > O script instala `windows-curses` se necessário e copia `agy-select` e `agy-select.cmd` diretamente para `%LOCALAPPDATA%\agy\bin` (que já está configurado no seu `PATH`).
 
 3.  **Ou Instalação Manual:**
     ```powershell
     pip install windows-curses
     # Copie os arquivos para a pasta de binários do agy ou qualquer pasta no PATH:
-    Copy-Item agy-select, agy-select.cmd, agy-select.ps1 -Destination "$env:LOCALAPPDATA\agy\bin"
+    Copy-Item agy-select, agy-select.cmd -Destination "$env:LOCALAPPDATA\agy\bin"
     ```
 
 ---
@@ -158,7 +158,7 @@ agy-select
 2.  **Manual install:**
     ```powershell
     pip install windows-curses
-    Copy-Item agy-select, agy-select.cmd, agy-select.ps1 -Destination "$env:LOCALAPPDATA\agy\bin"
+    Copy-Item agy-select, agy-select.cmd -Destination "$env:LOCALAPPDATA\agy\bin"
     ```
 3.  Run it:
     ```powershell
