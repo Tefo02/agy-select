@@ -4,18 +4,58 @@ agy-select: Terminal User Interface (TUI) interativa estilo lazygit
 para gerenciar, pesquisar e retomar conversas do Google Antigravity CLI (agy).
 """
 
-import curses
 import glob
 import json
 import os
+import pathlib
 import re
 import shutil
 import sqlite3
 import sys
 import textwrap
+import urllib.request
 from urllib.parse import unquote, urlparse
 
+# Inicialização de suporte a console UTF-8 no Windows
+if sys.platform == "win32":
+    try:
+        if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# Importação defensiva do curses (com suporte e auto-instalação para windows-curses)
+try:
+    import curses
+except ImportError:
+    if sys.platform == "win32":
+        print("Módulo 'curses' não encontrado. Instalando dependência para Windows ('windows-curses')...", file=sys.stderr)
+        try:
+            import subprocess
+
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "windows-curses"])
+            import curses
+
+            print("'windows-curses' instalado com sucesso!\n", file=sys.stderr)
+        except Exception:
+            print(
+                "\nErro: No Windows, o 'agy-select' necessita da biblioteca 'windows-curses'.\n"
+                "Instale-a executando:\n\n"
+                "    pip install windows-curses\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        print(
+            "Erro: Módulo 'curses' não encontrado. Certifique-se de que o Python possui suporte a curses.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
 APP_DATA_DIR = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or os.path.expanduser("~/.gemini/antigravity-cli")
+APP_DATA_DIR = os.path.normpath(APP_DATA_DIR)
 BRAIN_DIR = os.path.join(APP_DATA_DIR, "brain")
 DB_PATH = os.path.join(APP_DATA_DIR, "conversation_summaries.db")
 CONVERSATIONS_DIR = os.path.join(APP_DATA_DIR, "conversations")
@@ -69,6 +109,42 @@ USER_REQUEST_REGEX = re.compile(r"<USER_REQUEST>([\s\S]*?)</USER_REQUEST>", re.I
 WRAPPER_TAGS_REGEX = re.compile(r"</?(?:USER_REQUEST|user_request)>")
 
 
+def normalize_fs_path(path: str) -> str:
+    """Normaliza caminhos do sistema de arquivos respeitando case-insensitivity no Windows."""
+    if not path:
+        return ""
+    canon = os.path.realpath(path)
+    return os.path.normcase(canon) if sys.platform == "win32" else canon
+
+
+def parse_uri_to_path(uri: str) -> str:
+    """Converte URI file:// ou caminho do SO para caminho nativo do SO."""
+    if not uri:
+        return ""
+    if uri.startswith("file://"):
+        parsed = urlparse(uri)
+        path = parsed.netloc + parsed.path if parsed.netloc and parsed.netloc not in ("localhost", "") else parsed.path
+        return urllib.request.url2pathname(unquote(path))
+    return uri
+
+
+def find_agy_executable() -> str:
+    """Localiza o binário do Google Antigravity CLI de forma cross-platform."""
+    found = shutil.which("agy") or shutil.which("agy.exe")
+    if found:
+        return found
+    if sys.platform == "win32":
+        candidates = [
+            os.path.expandvars(r"%LOCALAPPDATA%\agy\bin\agy.exe"),
+            os.path.expanduser(r"~\AppData\Local\agy\bin\agy.exe"),
+            os.path.expandvars(r"%ProgramFiles%\agy\bin\agy.exe"),
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
+    return "agy"
+
+
 def is_workspace_local(current_dir: str, uris_raw: str) -> bool:
     """Verifica se a conversa pertence ao diretório atual ou a subpastas dele de forma precisa."""
     if not uris_raw or not current_dir:
@@ -86,17 +162,14 @@ def is_workspace_local(current_dir: str, uris_raw: str) -> bool:
     else:
         uris_list = [uris_raw]
 
-    current_canon = os.path.realpath(current_dir)
-    user_home = os.path.realpath(os.path.expanduser("~"))
+    current_canon = normalize_fs_path(current_dir)
+    user_home = normalize_fs_path(os.path.expanduser("~"))
 
     for u in uris_list:
-        if u.startswith("file://"):
-            parsed_path = unquote(urlparse(u).path)
-        else:
-            parsed_path = u
+        parsed_path = parse_uri_to_path(u)
         if not parsed_path:
             continue
-        ws_canon = os.path.realpath(parsed_path)
+        ws_canon = normalize_fs_path(parsed_path)
 
         try:
             # Caso 1: CWD está dentro do workspace (ou são exatamente iguais)
@@ -451,8 +524,14 @@ class AgSelectTUI:
             self.last_list_panel = panel_id
 
     def init_colors(self):
-        curses.use_default_colors()
-        curses.curs_set(0)
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
         # 1: Borda Ativa (Laranja/Amarelo brilhante)
         curses.init_pair(1, curses.COLOR_YELLOW, -1)
         # 2: Borda Inativa (Cinza / Branco padrão)
@@ -1106,7 +1185,7 @@ class AgSelectTUI:
                 return False
             if ch in (curses.KEY_LEFT, curses.KEY_RIGHT, 9):  # Tab
                 selected_btn = 1 - selected_btn
-            elif ch in (ord("\n"), curses.KEY_ENTER):
+            elif ch in (ord("\n"), ord("\r"), 10, 13, curses.KEY_ENTER):
                 return selected_btn == 1
             elif ch in (ord("s"), ord("S"), ord("y"), ord("Y")):
                 return True
@@ -1282,7 +1361,11 @@ class AgSelectTUI:
                     (new_title, new_title, cid),
                 )
             else:
-                uris_json = json.dumps([f"file://{os.path.realpath(self.current_dir)}"])
+                try:
+                    ws_uri = pathlib.Path(os.path.realpath(self.current_dir)).as_uri()
+                except Exception:
+                    ws_uri = f"file://{os.path.realpath(self.current_dir)}"
+                uris_json = json.dumps([ws_uri])
                 cur.execute(
                     "INSERT INTO conversation_summaries (conversation_id, title, preview, workspace_uris, last_modified_time, last_user_input_time) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
                     (cid, new_title, new_title, uris_json),
@@ -1324,11 +1407,12 @@ class AgSelectTUI:
             try:
                 cid = conv["cid"]
                 delete_custom_title(cid)
-                cpath = os.path.realpath(conv.get("cpath", ""))
-                real_brain = os.path.realpath(BRAIN_DIR)
+                cpath = conv.get("cpath", "")
+                norm_cpath = normalize_fs_path(cpath)
+                norm_brain = normalize_fs_path(BRAIN_DIR)
 
                 # Valida que cpath é um diretório diretamente filho de BRAIN_DIR e corresponde ao cid
-                if os.path.dirname(cpath) == real_brain and os.path.basename(cpath) == cid:
+                if os.path.dirname(norm_cpath) == norm_brain and os.path.basename(norm_cpath) == cid:
                     if os.path.exists(cpath):
                         shutil.rmtree(cpath)
 
@@ -1622,8 +1706,15 @@ def main():
     chosen_cid = curses.wrapper(run_curses)
 
     if chosen_cid:
+        agy_bin = find_agy_executable()
         try:
-            os.execvp("agy", ["agy", "--conversation", chosen_cid])
+            if sys.platform == "win32":
+                import subprocess
+
+                ret = subprocess.call([agy_bin, "--conversation", chosen_cid])
+                sys.exit(ret)
+            else:
+                os.execvp(agy_bin, [agy_bin, "--conversation", chosen_cid])
         except FileNotFoundError:
             print("Erro: O executável 'agy' não foi encontrado no PATH.", file=sys.stderr)
             print("Certifique-se de que o Google Antigravity CLI está instalado e acessível no ambiente.", file=sys.stderr)
