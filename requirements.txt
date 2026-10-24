@@ -1,0 +1,2 @@
+# Dependências opcionais por plataforma
+windows-curses>=2.3.0; sys_platform == "win32"
